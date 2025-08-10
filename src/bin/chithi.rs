@@ -14,49 +14,38 @@
 //  You should have received a copy of the GNU General Public License
 //  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use chobi::chithi::{Args, Cmd, CmdTarget, Fs};
 use clap::Parser;
-use log::debug;
+use log::{debug, error};
 use regex::Regex;
 use std::{
     io::{self, BufRead, BufReader},
-    process::{Command, Stdio},
+    process::{Stdio, exit},
 };
-use chobi::chithi::Args;
 
-struct CmdConfig {
-    ssh_cmd: String,
-    ps_cmd: String,
+struct CmdConfig<'args> {
+    target_ps: Cmd<'args>,
 }
 
-impl CmdConfig {
-    fn is_zfs_busy(&self, rhost: String, fs: String, _is_root: bool) -> io::Result<bool> {
-        let mut ps_cmd: Command;
-        let mut on_rhost = String::new();
-        if !rhost.is_empty() {
-            ps_cmd = Command::new(&self.ssh_cmd);
-            ps_cmd.arg(&rhost);
-            ps_cmd.arg(&self.ps_cmd);
-            on_rhost.push_str(" on ");
-            on_rhost.push_str(&rhost);
-        } else {
-            ps_cmd = Command::new(&self.ps_cmd);
-        };
-        ps_cmd.args(["-Ao", "args="]);
+impl<'args> CmdConfig<'args> {
+    pub fn new(
+        target_cmd_target: &'args CmdTarget<'args>,
+        no_command_checks: bool,
+    ) -> io::Result<Self> {
+        let target_ps = Cmd::new(target_cmd_target, "ps", &["-Ao", "args="]);
+        if !no_command_checks {
+            target_ps.check_exists()?;
+        }
+        Ok(Self { target_ps })
+    }
 
-        // TODO do the debug! without this string
-        let ps_cmd_str = {
-            let mut str = ps_cmd.get_program().to_string_lossy().to_string();
-            for arg in ps_cmd.get_args() {
-                str.push(' ');
-                str.push_str(&arg.to_string_lossy());
-            }
-            str
-        };
+    fn is_zfs_busy(&self, fs: &Fs) -> io::Result<bool> {
         debug!(
-            "checking to see if {fs}{on_rhost} is already in zfs receive using {} ...",
-            ps_cmd_str
+            "checking to see if {fs} is already in zfs receive using {} ...",
+            self.target_ps
         );
 
+        let mut ps_cmd = self.target_ps.to_cmd();
         ps_cmd.stdout(Stdio::piped());
         let ps_process = ps_cmd.spawn()?;
 
@@ -64,7 +53,7 @@ impl CmdConfig {
         let ps_stdout = BufReader::new(ps_stdout);
 
         let re = {
-            let fs_re = regex::escape(&fs);
+            let fs_re = regex::escape(&fs.fs);
             // TODO is the \n? needed if we're using .lines(), leaving it there since it's harmless
             let pattern = format!(r"zfs *(receive|recv)[^\/]*{}\n?$", fs_re);
             Regex::new(&pattern).expect("regex pattern should be correct")
@@ -82,17 +71,28 @@ impl CmdConfig {
     }
 }
 
-impl Default for CmdConfig {
-    fn default() -> Self {
-        Self {
-            ssh_cmd: "ssh".to_string(),
-            ps_cmd: "ps".to_string(),
-        }
-    }
-}
-
-fn main() {
+fn main() -> io::Result<()> {
     let args = Args::parse();
 
     env_logger::init();
+
+    let source = Fs::new(args.source_host, args.source);
+    let target = Fs::new(args.target_host, args.target);
+    let source_cmd_target = CmdTarget::new(source.host.as_ref(), &args.ssh_options);
+    let target_cmd_target = CmdTarget::new(target.host.as_ref(), &args.ssh_options);
+    let local_cmd_target = CmdTarget::new_local();
+
+    if (source_cmd_target.is_remote() || target_cmd_target.is_remote()) && !args.no_command_checks {
+        let ssh_exists = Cmd::new(&local_cmd_target, "ssh", &[][..])
+            .to_check()
+            .output()?
+            .status
+            .success();
+        if !ssh_exists {
+            error!("there are remote targets, but ssh does not exist in local system");
+            exit(1);
+        }
+    }
+
+    Ok(())
 }

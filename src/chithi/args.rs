@@ -11,63 +11,66 @@ pub struct Args {
     /// pigz-fast, pigz-slow, zstd-fast, zstdmt-fast, zstd-slow, zstdmt-slow,
     /// lz4, xz, lzo & none
     #[arg(long, default_value = "lzo", value_name="FORMAT")]
-    compress: String,
+    pub compress: String,
 
     /// Extra identifier which is included in the snapshot name. Can be used for
     /// replicating to multiple targets.
     #[arg(long, value_name="EXTRA")]
-    identifier: Option<String>,
+    pub identifier: Option<String>,
 
     /// Also transfers child datasets
     #[arg(short, long)]
-    recursive: bool,
+    pub recursive: bool,
 
     /// Skips syncing of the parent dataset. Does nothing without '--recursive' option.
     #[arg(long, requires = "recursive")]
-    skip_parent: bool,
+    pub skip_parent: bool,
 
     /// Bandwidth limit in bytes/kbytes/etc per second on the source transfer
     #[arg(long, value_parser = Bytes::try_from_str)]
-    source_bwlimit: Option<Bytes>,
+    pub source_bwlimit: Option<Bytes>,
 
     /// Bandwidth limit in bytes/kbytes/etc per second on the target transfer
     #[arg(long, value_parser = Bytes::try_from_str)]
-    target_bwlimit: Option<Bytes>,
+    pub target_bwlimit: Option<Bytes>,
 
     /// Specify the mbuffer size, please refer to mbuffer(1) manual page.
     #[arg(long, default_value = "16M", value_name="VALUE")]
-    mbuffer_size: String,
+    pub mbuffer_size: String,
 
     /// Configure how pv displays the progress bar
     #[arg(long, default_value = "-p -t -e -r -b", value_name="OPTIONS")]
-    pv_options: String,
+    pub pv_options: String,
 
     /// Does not create new snapshot, only transfers existing
     #[arg(long)]
-    no_sync_snap: bool,
-
+    pub no_sync_snap: bool,
 
     /// Use advanced options for zfs send (the arguments are filtered as needed), e.g. syncoid --sendoptions="Lc e" sets zfs send -L -c -e ...
     #[arg(long, value_name="OPTIONS")]
-    sendoptions: Option<String>,
+    pub sendoptions: Option<String>,
 
     /// Use advanced options for zfs receive (the arguments are filtered as needed), e.g. syncoid --recvoptions="ux recordsize o compression=lz4" sets zfs receive -u -x recordsize -o compression=lz4 ...
     #[arg(long, value_name="OPTIONS")]
-    recvoptions: Option<String>,
+    pub recvoptions: Option<String>,
 
     /// Passes OPTION to ssh for remote usage. Can be specified multiple times
-    #[arg(short = 'o',long, value_name="OPTION")]
-    sshoption: Vec<String>,
+    #[arg(short = 'o',long = "sshoption", value_name="OPTION")]
+    pub ssh_options: Vec<String>,
+
+    /// Passes OPTION to ssh for remote usage. Can be specified multiple times
+    #[arg(long)]
+    pub no_command_checks: bool,
 
     /// Manually specifying source host (and user)
     #[arg(long)]
-    source_host: Option<String>,
+    pub source_host: Option<String>,
 
     /// Manually specifying target host (and user)
     #[arg(long)]
-    target_host: Option<String>,
+    pub target_host: Option<String>,
 
-    source: String,
+    pub source: String,
 
-    target: String,
+    pub target: String,
 }

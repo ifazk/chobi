@@ -14,13 +14,15 @@
 //  You should have received a copy of the GNU General Public License
 //  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-pub struct GetSsh {
+use std::fmt::Display;
+
+pub struct Fs {
     pub host: Option<String>,
     pub fs: String,
     pub is_root: bool,
 }
 
-impl GetSsh {
+impl Fs {
     pub fn new(host_opt: Option<String>, fs: String) -> Self {
         // There are three cases
         // 1. There's a separately provided hostname (which can also containe a
@@ -60,18 +62,30 @@ impl GetSsh {
     }
 }
 
+impl Display for Fs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.fs)?;
+        match &self.host {
+            Some(host) => {
+                write!(f, "on {}", host)?;
+            }
+            None => {}
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn simple_user_hosts() {
-        let GetSsh { host, fs, is_root } = GetSsh::new(None, String::from("user@host:pool"));
+        let Fs { host, fs, is_root } = Fs::new(None, String::from("user@host:pool"));
         assert_eq!(host, Some("user@host".to_string()));
         assert_eq!(fs, "pool");
         assert_eq!(is_root, true);
-        let GetSsh { host, fs, is_root } =
-            GetSsh::new(None, String::from("user@host:pool/filesystem"));
+        let Fs { host, fs, is_root } = Fs::new(None, String::from("user@host:pool/filesystem"));
         assert_eq!(host, Some("user@host".to_string()));
         assert_eq!(fs, "pool/filesystem");
         assert_eq!(is_root, false);
@@ -79,15 +93,15 @@ mod tests {
 
     #[test]
     fn simple_hosts_without_users() {
-        let GetSsh { host, fs, is_root } = GetSsh::new(None, String::from("host:pool"));
+        let Fs { host, fs, is_root } = Fs::new(None, String::from("host:pool"));
         assert_eq!(host, Some("host".to_string()));
         assert_eq!(fs, "pool");
         assert_eq!(is_root, true);
-        let GetSsh { host, fs, is_root } = GetSsh::new(None, String::from("host:pool/filesystem"));
+        let Fs { host, fs, is_root } = Fs::new(None, String::from("host:pool/filesystem"));
         assert_eq!(host, Some("host".to_string()));
         assert_eq!(fs, "pool/filesystem");
         assert_eq!(is_root, false);
-        let GetSsh { host, fs, is_root } = GetSsh::new(None, String::from("host:pool/filesystem:alsofs"));
+        let Fs { host, fs, is_root } = Fs::new(None, String::from("host:pool/filesystem:alsofs"));
         assert_eq!(host, Some("host".to_string()));
         assert_eq!(fs, "pool/filesystem:alsofs");
         assert_eq!(is_root, false);
@@ -95,12 +109,11 @@ mod tests {
 
     #[test]
     fn simple_user_hosts_pool_fs_colon() {
-        let GetSsh { host, fs, is_root } =
-            GetSsh::new(None, String::from("user@host:pool:alsopool"));
+        let Fs { host, fs, is_root } = Fs::new(None, String::from("user@host:pool:alsopool"));
         assert_eq!(host, Some("user@host".to_string()));
         assert_eq!(fs, "pool:alsopool");
         assert_eq!(is_root, true);
-        let GetSsh { host, fs, is_root } = GetSsh::new(
+        let Fs { host, fs, is_root } = Fs::new(
             None,
             String::from("user@host:pool:alsopool/filesystem:alsofs"),
         );
@@ -111,12 +124,12 @@ mod tests {
 
     #[test]
     fn empty_user_hosts() {
-        let GetSsh { host, fs, is_root } = GetSsh::new(Some("".to_string()), String::from("pool"));
+        let Fs { host, fs, is_root } = Fs::new(Some("".to_string()), String::from("pool"));
         assert_eq!(host, None);
         assert_eq!(fs, "pool");
         assert_eq!(is_root, true);
-        let GetSsh { host, fs, is_root } =
-            GetSsh::new(Some("".to_string()), String::from("pool/filesystem"));
+        let Fs { host, fs, is_root } =
+            Fs::new(Some("".to_string()), String::from("pool/filesystem"));
         assert_eq!(host, None);
         assert_eq!(fs, "pool/filesystem");
         assert_eq!(is_root, false);
@@ -124,12 +137,12 @@ mod tests {
 
     #[test]
     fn empty_user_hosts_pool_fs_colon() {
-        let GetSsh { host, fs, is_root } =
-            GetSsh::new(Some("".to_string()), String::from("poolnothost:alsopool"));
+        let Fs { host, fs, is_root } =
+            Fs::new(Some("".to_string()), String::from("poolnothost:alsopool"));
         assert_eq!(host, None);
         assert_eq!(fs, "poolnothost:alsopool");
         assert_eq!(is_root, true);
-        let GetSsh { host, fs, is_root } = GetSsh::new(
+        let Fs { host, fs, is_root } = Fs::new(
             Some("".to_string()),
             String::from("poolnothost:alsopool/filesystem:alsofs"),
         );
@@ -140,19 +153,21 @@ mod tests {
 
     #[test]
     fn nonempty_user_hosts_pool_fs_colon() {
-        let GetSsh { host, fs, is_root } =
-            GetSsh::new(Some("user@host".to_string()), String::from("poolnothost:alsopool"));
+        let Fs { host, fs, is_root } = Fs::new(
+            Some("user@host".to_string()),
+            String::from("poolnothost:alsopool"),
+        );
         assert_eq!(host, Some("user@host".to_string()));
         assert_eq!(fs, "poolnothost:alsopool");
         assert_eq!(is_root, true);
-        let GetSsh { host, fs, is_root } = GetSsh::new(
+        let Fs { host, fs, is_root } = Fs::new(
             Some("user@host".to_string()),
             String::from("poolnothost:alsopool/filesystem:alsofs"),
         );
         assert_eq!(host, Some("user@host".to_string()));
         assert_eq!(fs, "poolnothost:alsopool/filesystem:alsofs");
         assert_eq!(is_root, false);
-        let GetSsh { host, fs, is_root } = GetSsh::new(
+        let Fs { host, fs, is_root } = Fs::new(
             Some("user:wierduser@host:wierdhost".to_string()),
             String::from("poolnothost:alsopool/filesystem:alsofs"),
         );

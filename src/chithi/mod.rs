@@ -18,7 +18,10 @@
 // need to be public
 
 mod args;
-mod get_ssh;
+mod fs;
+mod cmd;
 
 pub use args::Args;
-pub use get_ssh::GetSsh;
+pub use fs::Fs;
+pub use cmd::CmdTarget;
+pub use cmd::Cmd;
