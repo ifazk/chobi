@@ -14,19 +14,49 @@
 //  You should have received a copy of the GNU General Public License
 //  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use libc::getuid;
 use std::fmt::Display;
 
-pub struct Fs {
-    pub host: Option<String>,
-    pub fs: String,
-    pub is_root: bool,
+pub fn get_is_roots(source: Option<&str>, target: Option<&str>) -> (bool, bool) {
+    fn get_is_root(host: Option<&str>) -> Option<bool> {
+        host.and_then(|user| user.split_once('@'))
+            .map(|(x, _)| x == "root")
+    }
+    let source_is_root = get_is_root(source);
+    let target_is_root = get_is_root(target);
+    let local_is_root = (source.is_none() || target.is_none()).then(|| unsafe { getuid() == 0 });
+    match (source_is_root, target_is_root, local_is_root) {
+        (None, None, Some(l)) => (l, l),
+        (None, Some(t), Some(l)) => (l, t),
+        (Some(s), None, Some(l)) => (s, l),
+        (Some(s), Some(t), None) => (s, t),
+        _ => unreachable!(),
+    }
 }
 
-impl Fs {
-    pub fn new(host_opt: Option<String>, fs: String) -> Self {
+pub struct Fs<'args> {
+    pub host: Option<&'args str>,
+    pub fs: &'args str,
+}
+
+fn split_host_at_colon(host: &str) -> Option<(&str, &str)> {
+    let mut iter = host.char_indices();
+    while let Some((pos, c)) = iter.next() {
+        if c == '/' {
+            return None;
+        }
+        if c == ':' {
+            return Some((&host[0..pos], iter.as_str()));
+        }
+    }
+    None
+}
+
+impl<'args> Fs<'args> {
+    pub fn new(host_opt: Option<&'args str>, fs: &'args str) -> Self {
         // There are three cases
-        // 1. There's a separately provided hostname (which can also containe a
-        // username), in which case we just figure out if the fs is root or not.
+        // 1. There's a separately provided hostname (which can also contain a
+        // username), in which case we .
         // This provided hostname can be the empty string, see below.
         // 2. There's no seprately provided hostname, and there's a : in fs
         // before any '/' -> host:filesystem, user@host:filesystem, or
@@ -41,35 +71,22 @@ impl Fs {
         let (host, fs) = match host_opt {
             Some(host) => (if host.is_empty() { None } else { Some(host) }, fs),
             None => {
-                if let Some(idx) = fs.find(&[':', '/']) {
-                    let bytes = fs.as_bytes();
-                    let (head, tail) = bytes.split_at(idx);
-                    if bytes[idx] == b':' {
-                        (
-                            Some(String::from_utf8_lossy(head).to_string()),
-                            String::from_utf8_lossy(&tail[1..]).to_string(),
-                        )
-                    } else {
-                        (None, fs)
-                    }
+                if let Some((host, fs)) = split_host_at_colon(fs) {
+                    (Some(host), fs)
                 } else {
                     (None, fs)
                 }
             }
         };
-        let is_root = !fs.contains('/');
-        Self { host, fs, is_root }
+        Self { host, fs }
     }
 }
 
-impl Display for Fs {
+impl<'args> Display for Fs<'args> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.fs)?;
-        match &self.host {
-            Some(host) => {
-                write!(f, "on {}", host)?;
-            }
-            None => {}
+        if let Some(host) = self.host {
+            write!(f, "on {}", host)?;
         }
         Ok(())
     }
@@ -81,98 +98,70 @@ mod tests {
 
     #[test]
     fn simple_user_hosts() {
-        let Fs { host, fs, is_root } = Fs::new(None, String::from("user@host:pool"));
-        assert_eq!(host, Some("user@host".to_string()));
+        let Fs { host, fs } = Fs::new(None, "user@host:pool");
+        assert_eq!(host, Some("user@host"));
         assert_eq!(fs, "pool");
-        assert_eq!(is_root, true);
-        let Fs { host, fs, is_root } = Fs::new(None, String::from("user@host:pool/filesystem"));
-        assert_eq!(host, Some("user@host".to_string()));
+        let Fs { host, fs } = Fs::new(None, "user@host:pool/filesystem");
+        assert_eq!(host, Some("user@host"));
         assert_eq!(fs, "pool/filesystem");
-        assert_eq!(is_root, false);
     }
 
     #[test]
     fn simple_hosts_without_users() {
-        let Fs { host, fs, is_root } = Fs::new(None, String::from("host:pool"));
-        assert_eq!(host, Some("host".to_string()));
+        let Fs { host, fs } = Fs::new(None, "host:pool");
+        assert_eq!(host, Some("host"));
         assert_eq!(fs, "pool");
-        assert_eq!(is_root, true);
-        let Fs { host, fs, is_root } = Fs::new(None, String::from("host:pool/filesystem"));
-        assert_eq!(host, Some("host".to_string()));
+        let Fs { host, fs } = Fs::new(None, "host:pool/filesystem");
+        assert_eq!(host, Some("host"));
         assert_eq!(fs, "pool/filesystem");
-        assert_eq!(is_root, false);
-        let Fs { host, fs, is_root } = Fs::new(None, String::from("host:pool/filesystem:alsofs"));
-        assert_eq!(host, Some("host".to_string()));
+        let Fs { host, fs } = Fs::new(None, "host:pool/filesystem:alsofs");
+        assert_eq!(host, Some("host"));
         assert_eq!(fs, "pool/filesystem:alsofs");
-        assert_eq!(is_root, false);
     }
 
     #[test]
     fn simple_user_hosts_pool_fs_colon() {
-        let Fs { host, fs, is_root } = Fs::new(None, String::from("user@host:pool:alsopool"));
-        assert_eq!(host, Some("user@host".to_string()));
+        let Fs { host, fs } = Fs::new(None, "user@host:pool:alsopool");
+        assert_eq!(host, Some("user@host"));
         assert_eq!(fs, "pool:alsopool");
-        assert_eq!(is_root, true);
-        let Fs { host, fs, is_root } = Fs::new(
-            None,
-            String::from("user@host:pool:alsopool/filesystem:alsofs"),
-        );
-        assert_eq!(host, Some("user@host".to_string()));
+        let Fs { host, fs } = Fs::new(None, "user@host:pool:alsopool/filesystem:alsofs");
+        assert_eq!(host, Some("user@host"));
         assert_eq!(fs, "pool:alsopool/filesystem:alsofs");
-        assert_eq!(is_root, false);
     }
 
     #[test]
     fn empty_user_hosts() {
-        let Fs { host, fs, is_root } = Fs::new(Some("".to_string()), String::from("pool"));
+        let Fs { host, fs } = Fs::new(Some(""), "pool");
         assert_eq!(host, None);
         assert_eq!(fs, "pool");
-        assert_eq!(is_root, true);
-        let Fs { host, fs, is_root } =
-            Fs::new(Some("".to_string()), String::from("pool/filesystem"));
+        let Fs { host, fs } = Fs::new(Some(""), "pool/filesystem");
         assert_eq!(host, None);
         assert_eq!(fs, "pool/filesystem");
-        assert_eq!(is_root, false);
     }
 
     #[test]
     fn empty_user_hosts_pool_fs_colon() {
-        let Fs { host, fs, is_root } =
-            Fs::new(Some("".to_string()), String::from("poolnothost:alsopool"));
+        let Fs { host, fs } = Fs::new(Some(""), "poolnothost:alsopool");
         assert_eq!(host, None);
         assert_eq!(fs, "poolnothost:alsopool");
-        assert_eq!(is_root, true);
-        let Fs { host, fs, is_root } = Fs::new(
-            Some("".to_string()),
-            String::from("poolnothost:alsopool/filesystem:alsofs"),
-        );
+        let Fs { host, fs } = Fs::new(Some(""), "poolnothost:alsopool/filesystem:alsofs");
         assert_eq!(host, None);
         assert_eq!(fs, "poolnothost:alsopool/filesystem:alsofs");
-        assert_eq!(is_root, false);
     }
 
     #[test]
     fn nonempty_user_hosts_pool_fs_colon() {
-        let Fs { host, fs, is_root } = Fs::new(
-            Some("user@host".to_string()),
-            String::from("poolnothost:alsopool"),
-        );
-        assert_eq!(host, Some("user@host".to_string()));
+        let Fs { host, fs } = Fs::new(Some("user@host"), "poolnothost:alsopool");
+        assert_eq!(host, Some("user@host"));
         assert_eq!(fs, "poolnothost:alsopool");
-        assert_eq!(is_root, true);
-        let Fs { host, fs, is_root } = Fs::new(
-            Some("user@host".to_string()),
-            String::from("poolnothost:alsopool/filesystem:alsofs"),
-        );
-        assert_eq!(host, Some("user@host".to_string()));
+        let Fs { host, fs } = Fs::new(Some("user@host"), "poolnothost:alsopool/filesystem:alsofs");
+        assert_eq!(host, Some("user@host"));
         assert_eq!(fs, "poolnothost:alsopool/filesystem:alsofs");
-        assert_eq!(is_root, false);
-        let Fs { host, fs, is_root } = Fs::new(
-            Some("user:wierduser@host:wierdhost".to_string()),
-            String::from("poolnothost:alsopool/filesystem:alsofs"),
+        let Fs { host, fs } = Fs::new(
+            Some("user:wierduser@host:wierdhost"),
+            "poolnothost:alsopool/filesystem:alsofs",
         );
-        assert_eq!(host, Some("user:wierduser@host:wierdhost".to_string()));
+        assert_eq!(host, Some("user:wierduser@host:wierdhost"));
         assert_eq!(fs, "poolnothost:alsopool/filesystem:alsofs");
-        assert_eq!(is_root, false);
     }
 }

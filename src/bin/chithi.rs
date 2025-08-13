@@ -14,7 +14,7 @@
 //  You should have received a copy of the GNU General Public License
 //  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use chobi::chithi::{Args, Cmd, CmdTarget, Fs};
+use chobi::chithi::{Args, Cmd, CmdTarget, Fs, get_is_roots};
 use clap::Parser;
 use log::{debug, error};
 use regex::Regex;
@@ -53,7 +53,7 @@ impl<'args> CmdConfig<'args> {
         let ps_stdout = BufReader::new(ps_stdout);
 
         let re = {
-            let fs_re = regex::escape(&fs.fs);
+            let fs_re = regex::escape(fs.fs);
             // TODO is the \n? needed if we're using .lines(), leaving it there since it's harmless
             let pattern = format!(r"zfs *(receive|recv)[^\/]*{}\n?$", fs_re);
             Regex::new(&pattern).expect("regex pattern should be correct")
@@ -76,10 +76,11 @@ fn main() -> io::Result<()> {
 
     env_logger::init();
 
-    let source = Fs::new(args.source_host, args.source);
-    let target = Fs::new(args.target_host, args.target);
-    let source_cmd_target = CmdTarget::new(source.host.as_ref(), &args.ssh_options);
-    let target_cmd_target = CmdTarget::new(target.host.as_ref(), &args.ssh_options);
+    let source = Fs::new(args.source_host.as_deref(), &args.source);
+    let target = Fs::new(args.target_host.as_deref(), &args.target);
+    let (source_is_root, target_is_root) = get_is_roots(source.host, target.host);
+    let source_cmd_target = CmdTarget::new(source.host, &args.ssh_options);
+    let target_cmd_target = CmdTarget::new(target.host, &args.ssh_options);
     let local_cmd_target = CmdTarget::new_local();
 
     if (source_cmd_target.is_remote() || target_cmd_target.is_remote()) && !args.no_command_checks {
@@ -92,6 +93,12 @@ fn main() -> io::Result<()> {
             error!("there are remote targets, but ssh does not exist in local system");
             exit(1);
         }
+    }
+
+    let cmds = CmdConfig::new(&target_cmd_target, args.no_command_checks)?;
+    if cmds.is_zfs_busy(&target)? {
+        error!("target {target} is currently in zfs recv");
+        exit(1);
     }
 
     Ok(())

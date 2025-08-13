@@ -22,6 +22,6 @@ mod fs;
 mod cmd;
 
 pub use args::Args;
-pub use fs::Fs;
+pub use fs::{Fs, get_is_roots};
 pub use cmd::CmdTarget;
 pub use cmd::Cmd;

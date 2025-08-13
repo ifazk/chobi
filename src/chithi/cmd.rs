@@ -21,13 +21,13 @@ use std::{
 
 type SshOption = String;
 
-pub struct Ssh<'options> {
-    host: String,
-    options: &'options Vec<SshOption>,
+pub struct Ssh<'args> {
+    host: &'args str,
+    options: &'args Vec<SshOption>,
 }
 
-impl<'options> Ssh<'options> {
-    pub fn new(host: String, options: &'options Vec<SshOption>) -> Self {
+impl<'args> Ssh<'args> {
+    pub fn new(host: &'args str, options: &'args Vec<SshOption>) -> Self {
         Self { host, options }
     }
     pub fn to_cmd(&self) -> Command {
@@ -35,7 +35,7 @@ impl<'options> Ssh<'options> {
         for option in self.options {
             cmd.args(["-o", option]);
         }
-        cmd.arg(&self.host);
+        cmd.arg(self.host);
         cmd
     }
 }
@@ -49,9 +49,9 @@ impl<'args> CmdTarget<'args> {
     pub fn new_local() -> Self {
         Self::Local
     }
-    pub fn new(host: Option<&String>, ssh_options: &'args Vec<SshOption>) -> Self {
+    pub fn new(host: Option<&'args str>, ssh_options: &'args Vec<SshOption>) -> Self {
         host.map_or(Self::Local, |host| {
-            let ssh = Ssh::new(host.clone(), ssh_options);
+            let ssh = Ssh::new(host, ssh_options);
             Self::Remote { ssh }
         })
     }
@@ -80,7 +80,7 @@ impl<'args> CmdTarget<'args> {
     pub fn host(&self) -> &str {
         match self {
             CmdTarget::Local => "",
-            CmdTarget::Remote { ssh } => &ssh.host,
+            CmdTarget::Remote { ssh } => ssh.host,
         }
     }
 }
