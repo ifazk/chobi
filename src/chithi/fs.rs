@@ -24,13 +24,12 @@ pub fn get_is_roots(source: Option<&str>, target: Option<&str>) -> (bool, bool) 
     }
     let source_is_root = get_is_root(source);
     let target_is_root = get_is_root(target);
-    let local_is_root = (source.is_none() || target.is_none()).then(|| unsafe { getuid() == 0 });
-    match (source_is_root, target_is_root, local_is_root) {
-        (None, None, Some(l)) => (l, l),
-        (None, Some(t), Some(l)) => (l, t),
-        (Some(s), None, Some(l)) => (s, l),
-        (Some(s), Some(t), None) => (s, t),
-        _ => unreachable!(),
+    match (source_is_root, target_is_root) {
+        (Some(s), Some(t)) => (s, t),
+        (s, t) => {
+            let local_is_root = unsafe { getuid() == 0 };
+            (s.unwrap_or(local_is_root), t.unwrap_or(local_is_root))
+        }
     }
 }
 
