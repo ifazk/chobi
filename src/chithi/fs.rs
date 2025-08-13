@@ -17,13 +17,13 @@
 use libc::getuid;
 use std::fmt::Display;
 
-pub fn get_is_roots(source: Option<&str>, target: Option<&str>) -> (bool, bool) {
-    fn get_is_root(host: Option<&str>) -> Option<bool> {
+pub fn get_is_roots(source: Option<&str>, target: Option<&str>, bypass_root_check: bool) -> (bool, bool) {
+    fn get_is_root(host: Option<&str>, bypass_root_check: bool) -> Option<bool> {
         host.and_then(|user| user.split_once('@'))
-            .map(|(x, _)| x == "root")
+            .map(|(user, _)| bypass_root_check || user == "root")
     }
-    let source_is_root = get_is_root(source);
-    let target_is_root = get_is_root(target);
+    let source_is_root = get_is_root(source, bypass_root_check);
+    let target_is_root = get_is_root(target, bypass_root_check);
     match (source_is_root, target_is_root) {
         (Some(s), Some(t)) => (s, t),
         (s, t) => {

@@ -78,7 +78,7 @@ fn main() -> io::Result<()> {
 
     let source = Fs::new(args.source_host.as_deref(), &args.source);
     let target = Fs::new(args.target_host.as_deref(), &args.target);
-    let (source_is_root, target_is_root) = get_is_roots(source.host, target.host);
+    let (source_is_root, target_is_root) = get_is_roots(source.host, target.host, args.no_privilege_elevation);
     let source_cmd_target = CmdTarget::new(source.host, &args.ssh_options);
     let target_cmd_target = CmdTarget::new(target.host, &args.ssh_options);
     let local_cmd_target = CmdTarget::new_local();

@@ -62,6 +62,10 @@ pub struct Args {
     #[arg(long)]
     pub no_command_checks: bool,
 
+    /// Bypass the root check, for use with ZFS permission delegation
+    #[arg(long)]
+    pub no_privilege_elevation: bool,
+
     /// Manually specifying source host (and user)
     #[arg(long)]
     pub source_host: Option<String>,
