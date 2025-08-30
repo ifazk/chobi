@@ -25,18 +25,25 @@ use std::{
 
 struct CmdConfig<'args> {
     target_ps: Cmd<'args>,
+    target_zfs: Cmd<'args>,
 }
 
 impl<'args> CmdConfig<'args> {
     pub fn new(
         target_cmd_target: &'args CmdTarget<'args>,
+        target_is_root: bool,
         no_command_checks: bool,
     ) -> io::Result<Self> {
-        let target_ps = Cmd::new(target_cmd_target, "ps", &["-Ao", "args="]);
+        let target_ps = Cmd::new(target_cmd_target, false, "ps", &["-Ao", "args="]);
+        let target_zfs = Cmd::new(target_cmd_target, !target_is_root, "zfs", &[]);
         if !no_command_checks {
             target_ps.check_exists()?;
+            target_zfs.check_exists()?;
         }
-        Ok(Self { target_ps })
+        Ok(Self {
+            target_ps,
+            target_zfs,
+        })
     }
 
     fn is_zfs_busy(&self, fs: &Fs) -> io::Result<bool> {
@@ -52,6 +59,7 @@ impl<'args> CmdConfig<'args> {
         let ps_stdout = ps_process.stdout.expect("handle present");
         let ps_stdout = BufReader::new(ps_stdout);
 
+        // TODO do we really need rexeg for this? What's the [^\/]* really doing?
         let re = {
             let fs_re = regex::escape(fs.fs);
             // TODO is the \n? needed if we're using .lines(), leaving it there since it's harmless
@@ -69,6 +77,22 @@ impl<'args> CmdConfig<'args> {
 
         Ok(false)
     }
+
+    fn target_exists(&self, fs: &Fs) -> io::Result<bool> {
+        // TODO check fs escaping needs
+        let mut target_zfs = self.target_zfs.to_cmd();
+        target_zfs.args(["get", "-H", "name"]);
+        target_zfs.arg(fs.fs);
+        debug!("checking to see if target filesystem {fs} exists ...");
+        target_zfs
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let output = target_zfs.output()?;
+        // TODO why is this connect? "pool/foobar" begins with "pool/foo", but
+        // are different file systems. is this a bug in syncoid?
+        Ok(output.stdout[..].starts_with(fs.fs.as_bytes()) && output.status.success())
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -78,13 +102,16 @@ fn main() -> io::Result<()> {
 
     let source = Fs::new(args.source_host.as_deref(), &args.source);
     let target = Fs::new(args.target_host.as_deref(), &args.target);
-    let (source_is_root, target_is_root) = get_is_roots(source.host, target.host, args.no_privilege_elevation);
+
+    // Build commands
+    let (source_is_root, target_is_root) =
+        get_is_roots(source.host, target.host, args.no_privilege_elevation);
     let source_cmd_target = CmdTarget::new(source.host, &args.ssh_options);
     let target_cmd_target = CmdTarget::new(target.host, &args.ssh_options);
     let local_cmd_target = CmdTarget::new_local();
 
     if (source_cmd_target.is_remote() || target_cmd_target.is_remote()) && !args.no_command_checks {
-        let ssh_exists = Cmd::new(&local_cmd_target, "ssh", &[][..])
+        let ssh_exists = Cmd::new(&local_cmd_target, false, "ssh", &[][..])
             .to_check()
             .output()?
             .status
@@ -95,9 +122,17 @@ fn main() -> io::Result<()> {
         }
     }
 
-    let cmds = CmdConfig::new(&target_cmd_target, args.no_command_checks)?;
+    let cmds = CmdConfig::new(&target_cmd_target, target_is_root, args.no_command_checks)?;
+
+    // Check if zfs is busy
     if cmds.is_zfs_busy(&target)? {
         error!("target {target} is currently in zfs recv");
+        exit(1);
+    }
+
+    // Check if target exists
+    if !cmds.target_exists(&target)? {
+        error!("target {target} does not exist");
         exit(1);
     }
 

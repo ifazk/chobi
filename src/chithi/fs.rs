@@ -17,6 +17,7 @@
 use libc::getuid;
 use std::fmt::Display;
 
+/// Check whether we should assume operations are as root
 pub fn get_is_roots(source: Option<&str>, target: Option<&str>, bypass_root_check: bool) -> (bool, bool) {
     fn get_is_root(host: Option<&str>, bypass_root_check: bool) -> Option<bool> {
         host.and_then(|user| user.split_once('@'))

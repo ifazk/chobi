@@ -16,7 +16,9 @@
 
 use log::error;
 use std::{
-    fmt::Display, io, process::{exit, Command}
+    fmt::Display,
+    io,
+    process::{Command, exit},
 };
 
 type SshOption = String;
@@ -88,13 +90,13 @@ impl<'args> CmdTarget<'args> {
 impl<'args> Display for CmdTarget<'args> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CmdTarget::Local => {},
+            CmdTarget::Local => {}
             CmdTarget::Remote { ssh } => {
                 write!(f, "ssh ")?;
                 for option in ssh.options {
                     write!(f, "-o {} ", option)?;
-                };
-            },
+                }
+            }
         };
         Ok(())
     }
@@ -102,21 +104,34 @@ impl<'args> Display for CmdTarget<'args> {
 
 pub struct Cmd<'args> {
     target: &'args CmdTarget<'args>,
+    sudo: bool,
     base: &'static str,
     args: &'args [&'args str],
 }
 
 impl<'args> Cmd<'args> {
-    pub fn new(target: &'args CmdTarget<'args>, cmd: &'static str, args: &'args [&'args str]) -> Self {
+    pub fn new(
+        target: &'args CmdTarget<'args>,
+        sudo: bool,
+        cmd: &'static str,
+        args: &'args [&'args str],
+    ) -> Self {
         Self {
             target,
+            sudo,
             base: cmd,
             args,
         }
     }
 
     pub fn to_cmd(&self) -> Command {
-        let mut cmd = self.target.make_cmd(self.base);
+        let mut cmd = if self.sudo {
+            let mut cmd = self.target.make_cmd("sudo");
+            cmd.arg(self.base);
+            cmd
+        } else {
+            self.target.make_cmd(self.base)
+        };
         for arg in self.args {
             cmd.arg(arg);
         }
@@ -147,7 +162,7 @@ impl<'args> Display for Cmd<'args> {
         write!(f, "{}{}", self.target, self.base)?;
         for arg in self.args {
             write!(f, " {}", arg)?;
-        };
+        }
         Ok(())
     }
 }
