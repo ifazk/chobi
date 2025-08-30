@@ -46,6 +46,26 @@ impl<'args> CmdConfig<'args> {
         })
     }
 
+    pub fn check_ssh_if_needed(
+        source_cmd_target: &CmdTarget,
+        target_cmd_target: &CmdTarget,
+        local_cmd_target: &CmdTarget,
+        no_command_checks: bool,
+    ) -> io::Result<()> {
+        if (source_cmd_target.is_remote() || target_cmd_target.is_remote()) && !no_command_checks {
+            let ssh_exists = Cmd::new(&local_cmd_target, false, "ssh", &[][..])
+                .to_check()
+                .output()?
+                .status
+                .success();
+            if !ssh_exists {
+                error!("there are remote targets, but ssh does not exist in local system");
+                exit(1);
+            }
+        }
+        Ok(())
+    }
+
     fn is_zfs_busy(&self, fs: &Fs) -> io::Result<bool> {
         debug!(
             "checking to see if {fs} is already in zfs receive using {} ...",
@@ -100,28 +120,24 @@ fn main() -> io::Result<()> {
 
     env_logger::init();
 
+    // Build fs
     let source = Fs::new(args.source_host.as_deref(), &args.source);
     let target = Fs::new(args.target_host.as_deref(), &args.target);
-
-    // Build commands
     let (source_is_root, target_is_root) =
         get_is_roots(source.host, target.host, args.no_privilege_elevation);
+
+    // Build command targets
     let source_cmd_target = CmdTarget::new(source.host, &args.ssh_options);
     let target_cmd_target = CmdTarget::new(target.host, &args.ssh_options);
     let local_cmd_target = CmdTarget::new_local();
 
-    if (source_cmd_target.is_remote() || target_cmd_target.is_remote()) && !args.no_command_checks {
-        let ssh_exists = Cmd::new(&local_cmd_target, false, "ssh", &[][..])
-            .to_check()
-            .output()?
-            .status
-            .success();
-        if !ssh_exists {
-            error!("there are remote targets, but ssh does not exist in local system");
-            exit(1);
-        }
-    }
-
+    // Build command configs
+    CmdConfig::check_ssh_if_needed(
+        &source_cmd_target,
+        &target_cmd_target,
+        &local_cmd_target,
+        args.no_command_checks,
+    )?;
     let cmds = CmdConfig::new(&target_cmd_target, target_is_root, args.no_command_checks)?;
 
     // Check if zfs is busy
