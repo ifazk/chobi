@@ -16,7 +16,7 @@
 
 use chobi::chithi::{Args, Cmd, CmdTarget, Fs, get_is_roots};
 use clap::Parser;
-use log::{debug, error};
+use log::{debug, trace, error};
 use regex::Regex;
 use std::{
     io::{self, BufRead, BufReader},
@@ -68,7 +68,7 @@ impl<'args> CmdConfig<'args> {
 
     fn is_zfs_busy(&self, fs: &Fs) -> io::Result<bool> {
         debug!(
-            "checking to see if {fs} is already in zfs receive using {} ...",
+            "checking if {fs} is already in zfs receive using {} ...",
             self.target_ps
         );
 
@@ -103,15 +103,19 @@ impl<'args> CmdConfig<'args> {
         let mut target_zfs = self.target_zfs.to_cmd();
         target_zfs.args(["get", "-H", "name"]);
         target_zfs.arg(fs.fs);
-        debug!("checking to see if target filesystem {fs} exists ...");
+        debug!("checking if target filesystem {fs} exists ...");
         target_zfs
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::inherit());
         let output = target_zfs.output()?;
-        // TODO why is this connect? "pool/foobar" begins with "pool/foo", but
+        if !output.status.success() {
+            error!("failed to check if target filesystem {fs} exists");
+            exit(1);
+        }
+        // TODO why is this correct? "pool/foobar" begins with "pool/foo", but
         // are different file systems. is this a bug in syncoid?
-        Ok(output.stdout[..].starts_with(fs.fs.as_bytes()) && output.status.success())
+        Ok(output.stdout[..].starts_with(fs.fs.as_bytes()))
     }
 }
 
@@ -126,10 +130,14 @@ fn main() -> io::Result<()> {
     let (source_is_root, target_is_root) =
         get_is_roots(source.host, target.host, args.no_privilege_elevation);
 
+    trace!("built fs");
+
     // Build command targets
     let source_cmd_target = CmdTarget::new(source.host, &args.ssh_options);
     let target_cmd_target = CmdTarget::new(target.host, &args.ssh_options);
     let local_cmd_target = CmdTarget::new_local();
+
+    trace!("built cmd targets");
 
     // Build command configs
     CmdConfig::check_ssh_if_needed(
@@ -140,17 +148,23 @@ fn main() -> io::Result<()> {
     )?;
     let cmds = CmdConfig::new(&target_cmd_target, target_is_root, args.no_command_checks)?;
 
+    trace!("built cmd configs");
+
     // Check if zfs is busy
     if cmds.is_zfs_busy(&target)? {
         error!("target {target} is currently in zfs recv");
         exit(1);
     }
 
+    trace!("checked for zfs busy");
+
     // Check if target exists
     if !cmds.target_exists(&target)? {
         error!("target {target} does not exist");
         exit(1);
     }
+
+    trace!("checked if target exists");
 
     Ok(())
 }

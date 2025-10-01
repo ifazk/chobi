@@ -14,7 +14,7 @@
 //  You should have received a copy of the GNU General Public License
 //  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use log::error;
+use log::{debug, error};
 use std::{
     fmt::Display,
     io,
@@ -61,6 +61,25 @@ impl<'args> CmdTarget<'args> {
         match self {
             CmdTarget::Local => false,
             CmdTarget::Remote { .. } => true,
+        }
+    }
+    fn make_check(&self, base: &'static str) -> Command {
+        // Like syncoid, use POSIX compatible command to check for program existence
+        // TODO figure out if there's a RUST native way of doing this
+        match self {
+            CmdTarget::Local => {
+                debug!("checking local command {base}");
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c");
+                cmd.arg(format!("command -v {base}"));
+                cmd
+            },
+            CmdTarget::Remote { ssh } => {
+                debug!("checking remote command {base} in {}", ssh.host);
+                let mut cmd = ssh.to_cmd();
+                cmd.args(["command", "-v", base]);
+                cmd
+            }
         }
     }
     fn make_cmd(&self, base: &'static str) -> Command {
@@ -139,12 +158,7 @@ impl<'args> Cmd<'args> {
     }
 
     pub fn to_check(&self) -> Command {
-        // Like syncoid, use POSIX compatible command to check for program existence
-        // TODO figure out if there's a RUST native way of doing this
-        let mut cmd = self.target.make_cmd("command");
-        cmd.arg("-v");
-        cmd.arg(self.base);
-        cmd
+        self.target.make_check(self.base)
     }
 
     pub fn check_exists(&self) -> io::Result<()> {

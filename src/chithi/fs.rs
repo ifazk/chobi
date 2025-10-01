@@ -86,7 +86,7 @@ impl<'args> Display for Fs<'args> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.fs)?;
         if let Some(host) = self.host {
-            write!(f, "on {}", host)?;
+            write!(f, " on {}", host)?;
         }
         Ok(())
     }
