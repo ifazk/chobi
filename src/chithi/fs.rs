@@ -15,10 +15,14 @@
 //  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use libc::getuid;
-use std::fmt::Display;
+use std::{borrow::Cow, fmt::Display, io};
 
 /// Check whether we should assume operations are as root
-pub fn get_is_roots(source: Option<&str>, target: Option<&str>, bypass_root_check: bool) -> (bool, bool) {
+pub fn get_is_roots(
+    source: Option<&str>,
+    target: Option<&str>,
+    bypass_root_check: bool,
+) -> (bool, bool) {
     fn get_is_root(host: Option<&str>, bypass_root_check: bool) -> Option<bool> {
         host.and_then(|user| user.split_once('@'))
             .map(|(user, _)| bypass_root_check || user == "root")
@@ -36,7 +40,9 @@ pub fn get_is_roots(source: Option<&str>, target: Option<&str>, bypass_root_chec
 
 pub struct Fs<'args> {
     pub host: Option<&'args str>,
-    pub fs: &'args str,
+    pub fs: Cow<'args, str>, // use owned for child datasets
+    #[allow(unused)]
+    pub origin: Option<String>, // TODO clone handling
 }
 
 fn split_host_at_colon(host: &str) -> Option<(&str, &str)> {
@@ -78,7 +84,29 @@ impl<'args> Fs<'args> {
                 }
             }
         };
-        Self { host, fs }
+        Self {
+            host,
+            fs: fs.into(),
+            origin: None,
+        }
+    }
+    /// Creates a child dataset. Origin can be "-".
+    pub fn new_child(&self, name: String, origin: String) -> Self {
+        Self {
+            host: self.host,
+            fs: name.into(),
+            origin: if origin == "-" { None } else { Some(origin) },
+        }
+    }
+    pub fn child_from_source(&self, source: &Self, child: &Self) -> io::Result<Self> {
+        let Some(dataset) = child.fs.strip_prefix(source.fs.as_ref()) else {
+            return Err(io::Error::other(format!(
+                "child {child} did not start with source {source}"
+            )));
+        };
+        let mut target_dataset = self.fs.to_string();
+        target_dataset.push_str(dataset);
+        Ok(self.new_child(target_dataset, "-".to_string()))
     }
 }
 
@@ -98,66 +126,122 @@ mod tests {
 
     #[test]
     fn simple_user_hosts() {
-        let Fs { host, fs } = Fs::new(None, "user@host:pool");
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(None, "user@host:pool");
         assert_eq!(host, Some("user@host"));
         assert_eq!(fs, "pool");
-        let Fs { host, fs } = Fs::new(None, "user@host:pool/filesystem");
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(None, "user@host:pool/filesystem");
         assert_eq!(host, Some("user@host"));
         assert_eq!(fs, "pool/filesystem");
     }
 
     #[test]
     fn simple_hosts_without_users() {
-        let Fs { host, fs } = Fs::new(None, "host:pool");
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(None, "host:pool");
         assert_eq!(host, Some("host"));
         assert_eq!(fs, "pool");
-        let Fs { host, fs } = Fs::new(None, "host:pool/filesystem");
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(None, "host:pool/filesystem");
         assert_eq!(host, Some("host"));
         assert_eq!(fs, "pool/filesystem");
-        let Fs { host, fs } = Fs::new(None, "host:pool/filesystem:alsofs");
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(None, "host:pool/filesystem:alsofs");
         assert_eq!(host, Some("host"));
         assert_eq!(fs, "pool/filesystem:alsofs");
     }
 
     #[test]
     fn simple_user_hosts_pool_fs_colon() {
-        let Fs { host, fs } = Fs::new(None, "user@host:pool:alsopool");
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(None, "user@host:pool:alsopool");
         assert_eq!(host, Some("user@host"));
         assert_eq!(fs, "pool:alsopool");
-        let Fs { host, fs } = Fs::new(None, "user@host:pool:alsopool/filesystem:alsofs");
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(None, "user@host:pool:alsopool/filesystem:alsofs");
         assert_eq!(host, Some("user@host"));
         assert_eq!(fs, "pool:alsopool/filesystem:alsofs");
     }
 
     #[test]
     fn empty_user_hosts() {
-        let Fs { host, fs } = Fs::new(Some(""), "pool");
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(Some(""), "pool");
         assert_eq!(host, None);
         assert_eq!(fs, "pool");
-        let Fs { host, fs } = Fs::new(Some(""), "pool/filesystem");
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(Some(""), "pool/filesystem");
         assert_eq!(host, None);
         assert_eq!(fs, "pool/filesystem");
     }
 
     #[test]
     fn empty_user_hosts_pool_fs_colon() {
-        let Fs { host, fs } = Fs::new(Some(""), "poolnothost:alsopool");
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(Some(""), "poolnothost:alsopool");
         assert_eq!(host, None);
         assert_eq!(fs, "poolnothost:alsopool");
-        let Fs { host, fs } = Fs::new(Some(""), "poolnothost:alsopool/filesystem:alsofs");
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(Some(""), "poolnothost:alsopool/filesystem:alsofs");
         assert_eq!(host, None);
         assert_eq!(fs, "poolnothost:alsopool/filesystem:alsofs");
     }
 
     #[test]
     fn nonempty_user_hosts_pool_fs_colon() {
-        let Fs { host, fs } = Fs::new(Some("user@host"), "poolnothost:alsopool");
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(Some("user@host"), "poolnothost:alsopool");
         assert_eq!(host, Some("user@host"));
         assert_eq!(fs, "poolnothost:alsopool");
-        let Fs { host, fs } = Fs::new(Some("user@host"), "poolnothost:alsopool/filesystem:alsofs");
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(Some("user@host"), "poolnothost:alsopool/filesystem:alsofs");
         assert_eq!(host, Some("user@host"));
         assert_eq!(fs, "poolnothost:alsopool/filesystem:alsofs");
-        let Fs { host, fs } = Fs::new(
+        let Fs {
+            host,
+            fs,
+            origin: _,
+        } = Fs::new(
             Some("user:wierduser@host:wierdhost"),
             "poolnothost:alsopool/filesystem:alsofs",
         );

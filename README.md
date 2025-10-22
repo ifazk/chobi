@@ -9,6 +9,13 @@ Rust. The functionality should all be there though, you should be able to to do
 the same things but the command line interface might be a little different, and
 some more escaping might be needed.
 
+## Current feature deviations/shortcomings
+
+1. Chithi: I've decided not to handle clones when replicating datasets. Part of
+the reason is, I don't use clones myself. I haven't closed the door on clones,
+but for now we assume `--no-clone-handling`.
+2. Chithi: I've decided not to handle `--exclude-datasets` for now.
+
 # Why Rust?
 There are no technical or social reasons why I'm choosing Rust. Go would have
 been a better option, which I also have some experience with. But I just happen

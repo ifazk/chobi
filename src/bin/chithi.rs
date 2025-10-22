@@ -16,7 +16,7 @@
 
 use chobi::chithi::{Args, Cmd, CmdTarget, Fs, get_is_roots};
 use clap::Parser;
-use log::{debug, trace, error};
+use log::{debug, error, trace};
 use regex::Regex;
 use std::{
     io::{self, BufRead, BufReader},
@@ -24,23 +24,29 @@ use std::{
 };
 
 struct CmdConfig<'args> {
+    source_zfs: Cmd<'args>,
     target_ps: Cmd<'args>,
     target_zfs: Cmd<'args>,
 }
 
 impl<'args> CmdConfig<'args> {
     pub fn new(
+        source_cmd_target: &'args CmdTarget<'args>,
+        source_is_root: bool,
         target_cmd_target: &'args CmdTarget<'args>,
         target_is_root: bool,
         no_command_checks: bool,
     ) -> io::Result<Self> {
+        let source_zfs = Cmd::new(source_cmd_target, !source_is_root, "zfs", &[]);
         let target_ps = Cmd::new(target_cmd_target, false, "ps", &["-Ao", "args="]);
         let target_zfs = Cmd::new(target_cmd_target, !target_is_root, "zfs", &[]);
         if !no_command_checks {
+            source_zfs.check_exists()?;
             target_ps.check_exists()?;
             target_zfs.check_exists()?;
         }
         Ok(Self {
+            source_zfs,
             target_ps,
             target_zfs,
         })
@@ -53,7 +59,7 @@ impl<'args> CmdConfig<'args> {
         no_command_checks: bool,
     ) -> io::Result<()> {
         if (source_cmd_target.is_remote() || target_cmd_target.is_remote()) && !no_command_checks {
-            let ssh_exists = Cmd::new(&local_cmd_target, false, "ssh", &[][..])
+            let ssh_exists = Cmd::new(local_cmd_target, false, "ssh", &[][..])
                 .to_check()
                 .output()?
                 .status
@@ -81,7 +87,7 @@ impl<'args> CmdConfig<'args> {
 
         // TODO do we really need rexeg for this? What's the [^\/]* really doing?
         let re = {
-            let fs_re = regex::escape(fs.fs);
+            let fs_re = regex::escape(fs.fs.as_ref());
             // TODO is the \n? needed if we're using .lines(), leaving it there since it's harmless
             let pattern = format!(r"zfs *(receive|recv)[^\/]*{}\n?$", fs_re);
             Regex::new(&pattern).expect("regex pattern should be correct")
@@ -102,7 +108,7 @@ impl<'args> CmdConfig<'args> {
         // TODO check fs escaping needs
         let mut target_zfs = self.target_zfs.to_cmd();
         target_zfs.args(["get", "-H", "name"]);
-        target_zfs.arg(fs.fs);
+        target_zfs.arg(fs.fs.as_ref());
         debug!("checking if target filesystem {fs} exists ...");
         target_zfs
             .stdin(Stdio::null())
@@ -116,6 +122,47 @@ impl<'args> CmdConfig<'args> {
         // TODO why is this correct? "pool/foobar" begins with "pool/foo", but
         // are different file systems. is this a bug in syncoid?
         Ok(output.stdout[..].starts_with(fs.fs.as_bytes()))
+    }
+
+    fn get_child_datasets<'a>(&self, fs: &Fs<'a>) -> io::Result<Vec<Fs<'a>>> {
+        let mut source_zfs = self.source_zfs.to_cmd();
+        const LIST_CHILD_DATASET: [&str; 6] = [
+            "list",
+            "-o",
+            "name,origin",
+            "-t",
+            "filesystem,volume",
+            "-Hr",
+        ];
+        source_zfs.args(LIST_CHILD_DATASET);
+        source_zfs.arg(fs.fs.as_ref());
+        debug!(
+            "getting list of child datasets for {fs} using {} {} {}...",
+            self.source_zfs,
+            LIST_CHILD_DATASET.join(" "),
+            fs.fs
+        );
+        source_zfs
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let output = source_zfs.output()?;
+        if !output.status.success() {
+            error!("failed to get child datasets for {fs}");
+            exit(1);
+        }
+        let mut children = Vec::new();
+        for line in output.stdout.lines() {
+            let line = line?;
+            let Some((name, origin)) = line.split_once("\t") else {
+                return Err(io::Error::other(format!(
+                    "expected tab separated name and origin, got {line}"
+                )));
+            };
+            let child = fs.new_child(name.to_string(), origin.to_string());
+            children.push(child);
+        }
+        Ok(children)
     }
 }
 
@@ -146,7 +193,13 @@ fn main() -> io::Result<()> {
         &local_cmd_target,
         args.no_command_checks,
     )?;
-    let cmds = CmdConfig::new(&target_cmd_target, target_is_root, args.no_command_checks)?;
+    let cmds = CmdConfig::new(
+        &source_cmd_target,
+        source_is_root,
+        &target_cmd_target,
+        target_is_root,
+        args.no_command_checks,
+    )?;
 
     trace!("built cmd configs");
 
@@ -165,6 +218,24 @@ fn main() -> io::Result<()> {
     }
 
     trace!("checked if target exists");
+
+    // Check if recursive
+    if !args.recursive {
+        // TODO change this debug to sync
+        debug!("source: {source} target: {target}");
+    } else {
+        // Get child datasets
+        let datasets = cmds.get_child_datasets(&source)?;
+        if datasets.is_empty() {
+            error!("no datasets found");
+            exit(1);
+        }
+        for fs in datasets {
+            // assume no clone handling
+            // TODO change these debug to syncs
+            debug!("source: {fs} target: {}", target.child_from_source(&source, &fs)?);
+        }
+    }
 
     Ok(())
 }
