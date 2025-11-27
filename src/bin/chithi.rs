@@ -14,12 +14,12 @@
 //  You should have received a copy of the GNU General Public License
 //  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use chobi::chithi::{Args, Cmd, CmdTarget, Fs, get_is_roots};
+use chobi::chithi::{Args, Cmd, CmdTarget, Fs, Role, get_is_roots, sys};
 use clap::Parser;
-use log::{debug, error, trace};
+use log::{debug, error, info, trace, warn};
 use regex::Regex;
 use std::{
-    io::{self, BufRead, BufReader},
+    io::{self, BufRead, BufReader, Write},
     process::{Stdio, exit},
 };
 
@@ -105,7 +105,7 @@ impl<'args> CmdConfig<'args> {
     }
 
     fn target_exists(&self, fs: &Fs) -> io::Result<bool> {
-        // TODO check fs escaping needs
+        // TODO can we use get_zfs_value(fs, "name") instead?
         let mut target_zfs = self.target_zfs.to_cmd();
         target_zfs.args(["get", "-H", "name"]);
         target_zfs.arg(fs.fs.as_ref());
@@ -122,6 +122,17 @@ impl<'args> CmdConfig<'args> {
         // TODO why is this correct? "pool/foobar" begins with "pool/foo", but
         // are different file systems. is this a bug in syncoid?
         Ok(output.stdout[..].starts_with(fs.fs.as_bytes()))
+    }
+
+    fn get_resume_token(&self, fs: &Fs) -> io::Result<Option<String>> {
+        // returning early without checking ErrorKind::NotFound is okay here
+        // since there is a call to target_exists before
+        let token = self.get_zfs_value(fs, "receive_resume_token")?;
+        if !["-", ""].contains(&token.as_str()) {
+            return Ok(Some(token));
+        }
+        debug!("no recv token found");
+        Ok(None)
     }
 
     fn get_child_datasets<'a>(&self, fs: &Fs<'a>) -> io::Result<Vec<Fs<'a>>> {
@@ -164,6 +175,113 @@ impl<'args> CmdConfig<'args> {
         }
         Ok(children)
     }
+
+    fn pick_zfs(&self, role: Role) -> &Cmd<'args> {
+        match role {
+            Role::Source => &self.source_zfs,
+            Role::Target => &self.target_zfs,
+        }
+    }
+
+    /// Returns ErrorKind::NotFound if dataset does not exist
+    fn get_zfs_value(&self, fs: &Fs, property: &str) -> io::Result<String> {
+        debug!("getting current value of {property} on {fs}");
+        let mut zfs = self.pick_zfs(fs.role).to_cmd();
+        zfs.args(["get", "-H", property, &fs.fs])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = zfs.output()?;
+        // Output err since we're not inheriting
+        io::stderr().write_all(&output.stderr)?;
+
+        // handle does not exist
+        const DOES_NOT_EXIST: &str = "dataset does not exist";
+        let err_bytes = &output.stderr[..];
+        if err_bytes
+            .windows(DOES_NOT_EXIST.len())
+            .any(|x| x == DOES_NOT_EXIST.as_bytes())
+        {
+            return Err(io::Error::new(io::ErrorKind::NotFound, DOES_NOT_EXIST));
+        };
+
+        if !output.status.success() {
+            // other error
+            error!("failed to get property {property} for {fs}");
+            exit(1);
+        };
+        let stdout = output.stdout;
+        let stdout = str::from_utf8(&stdout)
+            .map_err(|e| {
+                io::Error::other(format!(
+                    "could not parse output of zfs -H {property} {}: {e}",
+                    fs.fs
+                ))
+            })?
+            .trim();
+        let value = stdout.split('\t').nth(2).ok_or_else(|| {
+            io::Error::other(format!(
+                "expected zfs -H {property} {} to return at least three fields",
+                fs.fs
+            ))
+        })?;
+        Ok(value.to_string())
+    }
+
+    /// Syncs a single dataset
+    fn sync_dataset(&self, source: &Fs, target: &Fs) -> io::Result<()> {
+        debug!("syncing source {} to target {}", source, target);
+        let sync = self.get_zfs_value(source, "syncoid:sync");
+        let sync = match sync {
+            Ok(sync) => sync,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                warn!("Skipping dataset (dataset no longer exists): {source}");
+                return Ok(());
+            }
+            Err(e) => {
+                // syncoid sets exit code here, we're going to let caller decide
+                return Err(e);
+            }
+        };
+
+        if sync == "false" {
+            info!("Skipping dataset (syncoid:sync=false): {source}...");
+            return Ok(());
+        } else if !["true", "-", ""].contains(&sync.as_str()) {
+            // empty is handled the same as "-", hostnames "true" and "false" are
+            // unsupported, and hostnames cannot start with "-" anyway (citation needed)
+            let host_id = sys::hostname()?;
+            if !sync.split(',').any(|x| x == host_id) {
+                info!("Skipping dataset (syncoid:sync does not contain {host_id}): {source}...");
+                return Ok(());
+            }
+        }
+
+        // Check that zfs is not in recv
+        if self.is_zfs_busy(&target)? {
+            warn!("Cannot sync now: {target} is already target of a zfs recv process");
+            exit(1);
+        }
+
+        // Check if target exists
+        let target_exists = self.target_exists(target)?;
+
+        // TODO support --no-resume
+        let _recv_token = if target_exists {
+            let recv_token = self.get_resume_token(&target)?;
+            if let Some(recv_token) = recv_token.as_ref() {
+                debug!("got recv resume token: {recv_token}")
+            };
+            recv_token
+        } else {
+            None
+        };
+
+        // TODO
+        debug!("syncing datasets is not implemented yet");
+
+        Ok(())
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -172,8 +290,8 @@ fn main() -> io::Result<()> {
     env_logger::init();
 
     // Build fs
-    let source = Fs::new(args.source_host.as_deref(), &args.source);
-    let target = Fs::new(args.target_host.as_deref(), &args.target);
+    let source = Fs::new(args.source_host.as_deref(), &args.source, Role::Source);
+    let target = Fs::new(args.target_host.as_deref(), &args.target, Role::Target);
     let (source_is_root, target_is_root) =
         get_is_roots(source.host, target.host, args.no_privilege_elevation);
 
@@ -203,26 +321,9 @@ fn main() -> io::Result<()> {
 
     trace!("built cmd configs");
 
-    // Check if zfs is busy
-    if cmds.is_zfs_busy(&target)? {
-        error!("target {target} is currently in zfs recv");
-        exit(1);
-    }
-
-    trace!("checked for zfs busy");
-
-    // Check if target exists
-    if !cmds.target_exists(&target)? {
-        error!("target {target} does not exist");
-        exit(1);
-    }
-
-    trace!("checked if target exists");
-
     // Check if recursive
     if !args.recursive {
-        // TODO change this debug to sync
-        debug!("source: {source} target: {target}");
+        cmds.sync_dataset(&source, &target)?
     } else {
         // Get child datasets
         let datasets = cmds.get_child_datasets(&source)?;
@@ -232,8 +333,8 @@ fn main() -> io::Result<()> {
         }
         for fs in datasets {
             // assume no clone handling
-            // TODO change these debug to syncs
-            debug!("source: {fs} target: {}", target.child_from_source(&source, &fs)?);
+            let child_target = target.child_from_source(&source, &fs)?;
+            cmds.sync_dataset(&fs, &child_target)?;
         }
     }
 

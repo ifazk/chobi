@@ -20,8 +20,9 @@
 mod args;
 mod fs;
 mod cmd;
+pub mod sys;
 
 pub use args::Args;
-pub use fs::{Fs, get_is_roots};
+pub use fs::{Fs, get_is_roots, Role};
 pub use cmd::CmdTarget;
 pub use cmd::Cmd;
