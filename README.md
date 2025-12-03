@@ -19,6 +19,9 @@ but for now we assume `--no-clone-handling`.
 always rollback if data has been written to the recieving dataset.
 4. Chithi: For hostname checks for `syncoid:sync`, the machine's hostname must
 be less than 255 characters long.
+5. Chithi: We only support platforms which have the `-t` option for zfs, i.e. we
+don't reimplemnt the fallback snapshot fetching in syncoid. This means no
+solaris.
 
 # Why Rust?
 There are no technical or social reasons why I'm choosing Rust. Go would have

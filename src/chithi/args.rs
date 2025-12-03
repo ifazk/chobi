@@ -58,9 +58,21 @@ pub struct Args {
     #[arg(short = 'o',long = "sshoption", value_name="OPTION")]
     pub ssh_options: Vec<String>,
 
+    /// Dumps a list of snapshots during the run
+    #[arg(long)]
+    pub dump_snaps: bool,
+
     /// Passes OPTION to ssh for remote usage. Can be specified multiple times
     #[arg(long)]
     pub no_command_checks: bool,
+
+    /// Do a dry run, without modify datasets and pool
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Don't use the ZFS resume feature if available
+    #[arg(long)]
+    pub no_resume: bool,
 
     /// Bypass the root check, for use with ZFS permission delegation
     #[arg(long)]

@@ -14,11 +14,14 @@
 //  You should have received a copy of the GNU General Public License
 //  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use chobi::AutoKill;
+use chobi::chithi::sys::{get_date, hostname};
 use chobi::chithi::{Args, Cmd, CmdTarget, Fs, Role, get_is_roots, sys};
 use clap::Parser;
 use log::{debug, error, info, trace, warn};
 use regex::Regex;
 use std::{
+    collections::HashMap,
     io::{self, BufRead, BufReader, Write},
     process::{Stdio, exit},
 };
@@ -27,6 +30,7 @@ struct CmdConfig<'args> {
     source_zfs: Cmd<'args>,
     target_ps: Cmd<'args>,
     target_zfs: Cmd<'args>,
+    args: &'args Args,
 }
 
 impl<'args> CmdConfig<'args> {
@@ -35,12 +39,12 @@ impl<'args> CmdConfig<'args> {
         source_is_root: bool,
         target_cmd_target: &'args CmdTarget<'args>,
         target_is_root: bool,
-        no_command_checks: bool,
+        args: &'args Args,
     ) -> io::Result<Self> {
         let source_zfs = Cmd::new(source_cmd_target, !source_is_root, "zfs", &[]);
         let target_ps = Cmd::new(target_cmd_target, false, "ps", &["-Ao", "args="]);
         let target_zfs = Cmd::new(target_cmd_target, !target_is_root, "zfs", &[]);
-        if !no_command_checks {
+        if !args.no_command_checks {
             source_zfs.check_exists()?;
             target_ps.check_exists()?;
             target_zfs.check_exists()?;
@@ -49,6 +53,7 @@ impl<'args> CmdConfig<'args> {
             source_zfs,
             target_ps,
             target_zfs,
+            args,
         })
     }
 
@@ -80,9 +85,10 @@ impl<'args> CmdConfig<'args> {
 
         let mut ps_cmd = self.target_ps.to_cmd();
         ps_cmd.stdout(Stdio::piped());
-        let ps_process = ps_cmd.spawn()?;
+        let mut ps_process = ps_cmd.spawn()?;
 
-        let ps_stdout = ps_process.stdout.expect("handle present");
+        let ps_stdout = ps_process.stdout.take().expect("handle present");
+        let _ps_process = AutoKill::new(ps_process);
         let ps_stdout = BufReader::new(ps_stdout);
 
         // TODO do we really need rexeg for this? What's the [^\/]* really doing?
@@ -228,8 +234,130 @@ impl<'args> CmdConfig<'args> {
         Ok(value.to_string())
     }
 
+    fn get_snaps(&self, fs: &Fs) -> io::Result<HashMap<String, (String, String)>> {
+        debug!(
+            "getting list of snapshots on {fs} using zfs get -Hpd 1 -t snapshot guid,creation {}",
+            fs.fs
+        );
+        let mut zfs = self.pick_zfs(fs.role).to_cmd();
+        zfs.args([
+            "get",
+            "-Hpd",
+            "1",
+            "-t",
+            "snapshot",
+            "guid,creation",
+            &fs.fs,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+        let mut zfs_process = zfs.spawn()?;
+
+        // the output will have guids and creation on separate lines
+        let zfs_stdout = zfs_process
+            .stdout
+            .take()
+            .expect("stdout for process is piped");
+        let _zfs_process = AutoKill::new(zfs_process);
+        let zfs_stdout = BufReader::new(zfs_stdout);
+        let mut zfs_lines = zfs_stdout.lines();
+
+        let mut pre_snapshots = HashMap::new();
+        let mut creation_counter = 0usize;
+
+        while let Some(line) = zfs_lines.next() {
+            let line = line?;
+            let mut tsv = line.split('\t');
+            let fs_at_snapshot = tsv.next().ok_or_else(|| {
+                io::Error::other(format!("expected zfs get to return at least three fields"))
+            })?;
+            let Some(snapshot) = fs_at_snapshot
+                .strip_prefix(fs.fs.as_ref())
+                .and_then(|at_snapshot| at_snapshot.strip_prefix('@'))
+                .map(|snapshot| snapshot.to_string())
+            else {
+                // skip anything that is not the specified fs
+                warn!(
+                    "getting snapshots for {fs} got filesystem snapshot {fs_at_snapshot} which is not of the form {}@SNAPSHOT",
+                    fs.fs
+                );
+                continue;
+            };
+            let property = tsv.next().ok_or_else(|| {
+                io::Error::other(format!("expected zfs get to return at least three fields"))
+            })?;
+            let value = tsv.next().ok_or_else(|| {
+                io::Error::other(format!("expected zfs get to return at least three fields"))
+            })?;
+            if property == "guid" {
+                let mapped_value = pre_snapshots.entry(snapshot).or_insert((None, None));
+                mapped_value.0 = Some(value.to_string());
+            } else if property == "creation" {
+                // creation times are accurate to a second, but snapshots in the
+                // same second are highly likely. The list command output is
+                // ordered, so we add a running number to the creation timestamp
+                // and make sure they are ordered correctly.
+                // Note syncoid goes out of the way to number these from 0, but
+                // we just do a running counter since we only care about the order
+                // TODO: check if this messes with anything or do we really need
+                // things orderered from 0
+                let mapped_value = pre_snapshots.entry(snapshot).or_insert((None, None));
+                mapped_value.1 = Some(format!("{value}{creation_counter:03}"));
+                creation_counter += 1;
+            } else {
+                // skip anything that is not guid/creation
+                warn!("getting snapshots for {fs} got property which is not one of guid,creation");
+                continue;
+            };
+        }
+
+        let mut snapshots = HashMap::new();
+        for (snapshot, pair) in pre_snapshots {
+            let Some(guid_creation) = pair.0.zip(pair.1) else {
+                return Err(io::Error::other(format!(
+                    "didn't get both guid and creation for {snapshot}"
+                )));
+            };
+            snapshots.insert(snapshot, guid_creation);
+        }
+
+        Ok(snapshots)
+    }
+
+    fn new_sync_snap(&self, fs: &Fs) -> io::Result<String> {
+        let hostname = hostname()?;
+        let date = get_date();
+        let snap_name = format!(
+            "chithi_{}{hostname}_{date}",
+            self.args.identifier.as_deref().unwrap_or_default()
+        );
+        let fs_snapshot = format!("{}@{snap_name}", fs.fs);
+        if !self.args.dry_run {
+            let mut zfs = self.pick_zfs(fs.role).to_cmd();
+            zfs.args(["snapshot", fs_snapshot.as_str()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+            debug!("creating sync snapshot using zfs snapshot {fs_snapshot}...");
+            let output = zfs.output()?;
+
+            if !output.status.success() {
+                error!("failed to create snapshot {fs_snapshot}");
+                exit(2);
+            }
+        } else {
+            debug!("dry-run not running zfs snapshot {fs_snapshot}...");
+        };
+        Ok(snap_name)
+    }
+
+    // skip_sync_snapshot is set to true for these senarios
+    // 1. fallback clone creation
+    // 2. !bookmark && force-delete && delete successful (redo sync and skip snapshot creation beacuse it was already done)
+    // 3. sync incremental fails with destination already exists && force delete (redo sync and skip snapshot creating because it was already done)
     /// Syncs a single dataset
-    fn sync_dataset(&self, source: &Fs, target: &Fs) -> io::Result<()> {
+    fn sync_dataset(&self, source: &Fs, target: &Fs, skip_sync_snapshot: bool) -> io::Result<()> {
         debug!("syncing source {} to target {}", source, target);
         let sync = self.get_zfs_value(source, "syncoid:sync");
         let sync = match sync {
@@ -266,8 +394,7 @@ impl<'args> CmdConfig<'args> {
         // Check if target exists
         let target_exists = self.target_exists(target)?;
 
-        // TODO support --no-resume
-        let _recv_token = if target_exists {
+        let recv_token = if target_exists && !self.args.no_resume {
             let recv_token = self.get_resume_token(&target)?;
             if let Some(recv_token) = recv_token.as_ref() {
                 debug!("got recv resume token: {recv_token}")
@@ -276,6 +403,43 @@ impl<'args> CmdConfig<'args> {
         } else {
             None
         };
+
+        'snapshot_checking: {
+            // skip snapshot checking/creation in case of resumed recv
+            // TODO figure out how to avoid the recursive call, and just handle
+            // the resume first
+            if recv_token.is_some() {
+                break 'snapshot_checking;
+            }
+            let source_snaps = self.get_snaps(source)?;
+            let target_snaps = if target_exists {
+                Some(self.get_snaps(target)?)
+            } else {
+                None
+            };
+
+            if self.args.dump_snaps {
+                // TODO: println might be more appropriate
+                for (snapshot, (guid, creation)) in source_snaps.iter() {
+                    info!(
+                        "got snapshot {snapshot} with guid:{guid} creation:{creation} for {source}"
+                    )
+                }
+                if let Some(target_snaps) = target_snaps.as_ref() {
+                    for (snapshot, (guid, creation)) in target_snaps {
+                        info!(
+                            "got snapshot {snapshot} with guid:{guid} creation:{creation} for {target}"
+                        )
+                    }
+                };
+            }
+
+            if !self.args.no_sync_snap && !skip_sync_snapshot {
+                let new_sync_snap = self.new_sync_snap(source)?;
+                // TODO remove debug
+                debug!("created new sync snap {new_sync_snap}")
+            }
+        }
 
         // TODO
         debug!("syncing datasets is not implemented yet");
@@ -316,14 +480,14 @@ fn main() -> io::Result<()> {
         source_is_root,
         &target_cmd_target,
         target_is_root,
-        args.no_command_checks,
+        &args,
     )?;
 
     trace!("built cmd configs");
 
     // Check if recursive
     if !args.recursive {
-        cmds.sync_dataset(&source, &target)?
+        cmds.sync_dataset(&source, &target, false)?
     } else {
         // Get child datasets
         let datasets = cmds.get_child_datasets(&source)?;
@@ -334,7 +498,7 @@ fn main() -> io::Result<()> {
         for fs in datasets {
             // assume no clone handling
             let child_target = target.child_from_source(&source, &fs)?;
-            cmds.sync_dataset(&fs, &child_target)?;
+            cmds.sync_dataset(&fs, &child_target, false)?;
         }
     }
 

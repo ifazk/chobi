@@ -23,3 +23,25 @@ pub fn wip() {
     exit(1);
 }
 
+pub struct AutoKill {
+    inner: std::process::Child,
+}
+
+impl AutoKill {
+    pub fn new(child: std::process::Child) -> Self {
+        Self {
+            inner: child,
+        }
+    }
+}
+
+impl Drop for AutoKill {
+    fn drop(&mut self) {
+        if let Ok(_) = self.inner.try_wait() {
+            return;
+        }
+        // issue kill and hope for the best and wait
+        let _ = self.inner.kill();
+        let _ = self.inner.wait();
+    }
+}
