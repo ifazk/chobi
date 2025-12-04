@@ -22,6 +22,8 @@ be less than 255 characters long.
 5. Chithi: We only support platforms which have the `-t` option for zfs, i.e. we
 don't reimplemnt the fallback snapshot fetching in syncoid. This means no
 solaris.
+6. Chithi: We use the regex-lite crate for rexeg, and therefore do not support
+unicode case insensitivity or unicode character classes like `\p{Letter}`.
 
 # Why Rust?
 There are no technical or social reasons why I'm choosing Rust. Go would have

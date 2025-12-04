@@ -9,7 +9,7 @@ clap = { version = "4.5.42", features = ["derive"] }
 env_logger = "0.11.8"
 libc = "0.2.175"
 log = "0.4.27"
-regex = "1.11.1"
+regex-lite = "0.1.8"
 
 [profile.release]
 strip = true

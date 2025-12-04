@@ -19,18 +19,21 @@ use chobi::chithi::sys::{get_date, hostname};
 use chobi::chithi::{Args, Cmd, CmdTarget, Fs, Role, get_is_roots, sys};
 use clap::Parser;
 use log::{debug, error, info, trace, warn};
-use regex::Regex;
+use regex_lite::Regex;
 use std::{
     collections::HashMap,
     io::{self, BufRead, BufReader, Write},
     process::{Stdio, exit},
 };
 
+const DOES_NOT_EXIST: &str = "dataset does not exist";
+
 struct CmdConfig<'args> {
     source_zfs: Cmd<'args>,
     target_ps: Cmd<'args>,
     target_zfs: Cmd<'args>,
     args: &'args Args,
+    zfs_recv: Regex,
 }
 
 impl<'args> CmdConfig<'args> {
@@ -49,11 +52,23 @@ impl<'args> CmdConfig<'args> {
             target_ps.check_exists()?;
             target_zfs.check_exists()?;
         }
+        // precompile zfs_recv regex
+        let zfs_recv = {
+            // In syncoid they use this regex:
+            // "zfs *(receive|recv)[^\/]*\Q$fs\E\Z"
+            // zfs | space star | receive or recv | (not /) star | quoted(fs.fs) | \Z
+            // The (not /) star crudely covers flags like -s -F, etc.
+            // \Z is like $, but can match before a newline as well
+            // In our version we do a suffix check and then use the following pattern
+            Regex::new(r"zfs *(receive|recv).*\s$").expect("regex pattern should be correct")
+        };
+
         Ok(Self {
             source_zfs,
             target_ps,
             target_zfs,
             args,
+            zfs_recv,
         })
     }
 
@@ -91,17 +106,11 @@ impl<'args> CmdConfig<'args> {
         let _ps_process = AutoKill::new(ps_process);
         let ps_stdout = BufReader::new(ps_stdout);
 
-        // TODO do we really need rexeg for this? What's the [^\/]* really doing?
-        let re = {
-            let fs_re = regex::escape(fs.fs.as_ref());
-            // TODO is the \n? needed if we're using .lines(), leaving it there since it's harmless
-            let pattern = format!(r"zfs *(receive|recv)[^\/]*{}\n?$", fs_re);
-            Regex::new(&pattern).expect("regex pattern should be correct")
-        };
-
         for line in ps_stdout.lines() {
             let line = line?;
-            if re.is_match(&line) {
+            if let Some(line_prefix) = line.strip_suffix(fs.fs.as_ref())
+                && self.zfs_recv.is_match(line_prefix)
+            {
                 debug!("process {line} matches target {fs}");
                 return Ok(true);
             }
@@ -111,7 +120,7 @@ impl<'args> CmdConfig<'args> {
     }
 
     fn target_exists(&self, fs: &Fs) -> io::Result<bool> {
-        // TODO can we use get_zfs_value(fs, "name") instead?
+        // We don't use get_zfs_value(fs, "name") here to avoid printing the error value
         let mut target_zfs = self.target_zfs.to_cmd();
         target_zfs.args(["get", "-H", "name"]);
         target_zfs.arg(fs.fs.as_ref());
@@ -119,9 +128,16 @@ impl<'args> CmdConfig<'args> {
         target_zfs
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::piped());
         let output = target_zfs.output()?;
         if !output.status.success() {
+            if output
+                .stderr
+                .windows(DOES_NOT_EXIST.len())
+                .any(|x| x == DOES_NOT_EXIST.as_bytes())
+            {
+                return Ok(false);
+            }
             error!("failed to check if target filesystem {fs} exists");
             exit(1);
         }
@@ -202,7 +218,6 @@ impl<'args> CmdConfig<'args> {
         io::stderr().write_all(&output.stderr)?;
 
         // handle does not exist
-        const DOES_NOT_EXIST: &str = "dataset does not exist";
         let err_bytes = &output.stderr[..];
         if err_bytes
             .windows(DOES_NOT_EXIST.len())

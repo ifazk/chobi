@@ -1,4 +1,9 @@
-.PHONY: test test_help
+.PHONY: build test test_help
+
+build:
+	cargo build --release
+	# statically compiling for x86_64 is our differentiator from syncoid
+	ls -lah target/x86_64-unknown-linux-musl/release/chithi
 
 TEST_ARGS=
 

@@ -1,4 +1,5 @@
 use clap::Parser;
+use regex_lite::Regex;
 
 mod bw;
 use bw::Bytes;
@@ -45,6 +46,14 @@ pub struct Args {
     /// Does not create new snapshot, only transfers existing
     #[arg(long)]
     pub no_sync_snap: bool,
+
+    /// Exclude specific snapshots that match the given regular expression. Can be specified multiple times. If a snapshot matches both exclude-snaps and include-snaps patterns, then it will be excluded.
+    #[arg(long, value_name="REGEX")]
+    pub exclude_snaps: Vec<Regex>,
+
+    /// Only include snapshots that match the given regular expression. Can be specified multiple times. If a snapshot matches both exclude-snaps and include-snaps patterns, then it will be excluded.
+    #[arg(long, value_name="REGEX")]
+    pub include_snaps: Vec<Regex>,
 
     /// Use advanced options for zfs send (the arguments are filtered as needed), e.g. syncoid --sendoptions="Lc e" sets zfs send -L -c -e ...
     #[arg(long, value_name="OPTIONS")]
