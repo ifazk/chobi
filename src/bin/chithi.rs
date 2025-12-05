@@ -466,7 +466,10 @@ impl<'args> CmdConfig<'args> {
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .format_timestamp(None)
+        .format_target(false)
+        .init();
 
     // Build fs
     let source = Fs::new(args.source_host.as_deref(), &args.source, Role::Source);
