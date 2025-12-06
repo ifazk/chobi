@@ -56,6 +56,9 @@ impl Bytes {
         if limit == 0 {
             return Err("size limit cannot be zero");
         };
-        Ok(Self { size: limit, suffix })
+        Ok(Self {
+            size: limit,
+            suffix,
+        })
     }
 }

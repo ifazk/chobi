@@ -18,11 +18,11 @@
 // need to be public
 
 mod args;
-mod fs;
 mod cmd;
+mod fs;
 pub mod sys;
 
 pub use args::Args;
-pub use fs::{Fs, get_is_roots, Role};
-pub use cmd::CmdTarget;
 pub use cmd::Cmd;
+pub use cmd::CmdTarget;
+pub use fs::{Fs, Role, get_is_roots};

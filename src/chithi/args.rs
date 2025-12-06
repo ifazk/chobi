@@ -11,12 +11,12 @@ pub struct Args {
     /// Compresses data during transfer. Currently accepted options are gzip,
     /// pigz-fast, pigz-slow, zstd-fast, zstdmt-fast, zstd-slow, zstdmt-slow,
     /// lz4, xz, lzo & none
-    #[arg(long, default_value = "lzo", value_name="FORMAT")]
+    #[arg(long, default_value = "lzo", value_name = "FORMAT")]
     pub compress: String,
 
     /// Extra identifier which is included in the snapshot name. Can be used for
     /// replicating to multiple targets.
-    #[arg(long, value_name="EXTRA")]
+    #[arg(long, value_name = "EXTRA")]
     pub identifier: Option<String>,
 
     /// Also transfers child datasets
@@ -36,11 +36,11 @@ pub struct Args {
     pub target_bwlimit: Option<Bytes>,
 
     /// Specify the mbuffer size, please refer to mbuffer(1) manual page.
-    #[arg(long, default_value = "16M", value_name="VALUE")]
+    #[arg(long, default_value = "16M", value_name = "VALUE")]
     pub mbuffer_size: String,
 
     /// Configure how pv displays the progress bar
-    #[arg(long, default_value = "-p -t -e -r -b", value_name="OPTIONS")]
+    #[arg(long, default_value = "-p -t -e -r -b", value_name = "OPTIONS")]
     pub pv_options: String,
 
     /// Does not create new snapshot, only transfers existing
@@ -48,23 +48,23 @@ pub struct Args {
     pub no_sync_snap: bool,
 
     /// Exclude specific snapshots that match the given regular expression. Can be specified multiple times. If a snapshot matches both exclude-snaps and include-snaps patterns, then it will be excluded.
-    #[arg(long, value_name="REGEX")]
+    #[arg(long, value_name = "REGEX")]
     pub exclude_snaps: Vec<Regex>,
 
     /// Only include snapshots that match the given regular expression. Can be specified multiple times. If a snapshot matches both exclude-snaps and include-snaps patterns, then it will be excluded.
-    #[arg(long, value_name="REGEX")]
+    #[arg(long, value_name = "REGEX")]
     pub include_snaps: Vec<Regex>,
 
     /// Use advanced options for zfs send (the arguments are filtered as needed), e.g. syncoid --sendoptions="Lc e" sets zfs send -L -c -e ...
-    #[arg(long, value_name="OPTIONS")]
+    #[arg(long, value_name = "OPTIONS")]
     pub sendoptions: Option<String>,
 
     /// Use advanced options for zfs receive (the arguments are filtered as needed), e.g. syncoid --recvoptions="ux recordsize o compression=lz4" sets zfs receive -u -x recordsize -o compression=lz4 ...
-    #[arg(long, value_name="OPTIONS")]
+    #[arg(long, value_name = "OPTIONS")]
     pub recvoptions: Option<String>,
 
     /// Passes OPTION to ssh for remote usage. Can be specified multiple times
-    #[arg(short = 'o',long = "sshoption", value_name="OPTION")]
+    #[arg(short = 'o', long = "sshoption", value_name = "OPTION")]
     pub ssh_options: Vec<String>,
 
     /// Dumps a list of snapshots during the run

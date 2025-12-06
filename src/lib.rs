@@ -29,15 +29,13 @@ pub struct AutoKill {
 
 impl AutoKill {
     pub fn new(child: std::process::Child) -> Self {
-        Self {
-            inner: child,
-        }
+        Self { inner: child }
     }
 }
 
 impl Drop for AutoKill {
     fn drop(&mut self) {
-        if let Ok(_) = self.inner.try_wait() {
+        if self.inner.try_wait().is_ok() {
             return;
         }
         // issue kill and hope for the best and wait

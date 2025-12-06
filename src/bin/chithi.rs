@@ -276,16 +276,16 @@ impl<'args> CmdConfig<'args> {
             .expect("stdout for process is piped");
         let _zfs_process = AutoKill::new(zfs_process);
         let zfs_stdout = BufReader::new(zfs_stdout);
-        let mut zfs_lines = zfs_stdout.lines();
+        let zfs_lines = zfs_stdout.lines();
 
         let mut pre_snapshots = HashMap::new();
         let mut creation_counter = 0usize;
 
-        while let Some(line) = zfs_lines.next() {
+        for line in zfs_lines {
             let line = line?;
             let mut tsv = line.split('\t');
             let fs_at_snapshot = tsv.next().ok_or_else(|| {
-                io::Error::other(format!("expected zfs get to return at least three fields"))
+                io::Error::other("expected zfs get to return at least three fields")
             })?;
             let Some(snapshot) = fs_at_snapshot
                 .strip_prefix(fs.fs.as_ref())
@@ -300,10 +300,10 @@ impl<'args> CmdConfig<'args> {
                 continue;
             };
             let property = tsv.next().ok_or_else(|| {
-                io::Error::other(format!("expected zfs get to return at least three fields"))
+                io::Error::other("expected zfs get to return at least three fields")
             })?;
             let value = tsv.next().ok_or_else(|| {
-                io::Error::other(format!("expected zfs get to return at least three fields"))
+                io::Error::other("expected zfs get to return at least three fields")
             })?;
             if property == "guid" {
                 let mapped_value = pre_snapshots.entry(snapshot).or_insert((None, None));
@@ -401,7 +401,7 @@ impl<'args> CmdConfig<'args> {
         }
 
         // Check that zfs is not in recv
-        if self.is_zfs_busy(&target)? {
+        if self.is_zfs_busy(target)? {
             warn!("Cannot sync now: {target} is already target of a zfs recv process");
             exit(1);
         }
@@ -410,7 +410,7 @@ impl<'args> CmdConfig<'args> {
         let target_exists = self.target_exists(target)?;
 
         let recv_token = if target_exists && !self.args.no_resume {
-            let recv_token = self.get_resume_token(&target)?;
+            let recv_token = self.get_resume_token(target)?;
             if let Some(recv_token) = recv_token.as_ref() {
                 debug!("got recv resume token: {recv_token}")
             };

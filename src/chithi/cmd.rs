@@ -73,7 +73,7 @@ impl<'args> CmdTarget<'args> {
                 cmd.arg("-c");
                 cmd.arg(format!("command -v {base}"));
                 cmd
-            },
+            }
             CmdTarget::Remote { ssh } => {
                 debug!("checking remote command {base} in {}", ssh.host);
                 let mut cmd = ssh.to_cmd();
@@ -164,7 +164,7 @@ impl<'args> Cmd<'args> {
     pub fn check_exists(&self) -> io::Result<()> {
         let exists = self.to_check().output()?.status.success();
         if !exists {
-            error!(" does not exist in local system",);
+            error!("{} does not exist in local system", self.base);
             exit(1);
         }
         Ok(())

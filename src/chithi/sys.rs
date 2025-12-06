@@ -1,5 +1,5 @@
-use std::{ffi, io};
 use chrono::{Datelike, Timelike};
+use std::{ffi, io};
 
 // Ah hostnames, what wonderful fun
 // We make some simplifying support decisions here about the size of hostnames.
@@ -31,11 +31,8 @@ pub fn hostname() -> io::Result<String> {
     // null-termination isn't specified. The man pages also do not say whether
     // gethostname will return -1 or not if truncation happens. Just do a
     // null-termination check just to be sure.
-    if !buffer.iter().any(|&x| x == 0) {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "hostname longer than 255 bytes",
-        ));
+    if !buffer.contains(&0) {
+        return Err(io::Error::other("hostname longer than 255 bytes"));
     };
     // Safety: already did a null-termination check above, so safe
     let hostname_cstr = unsafe { ffi::CStr::from_ptr(buffer.as_ptr()) };
@@ -56,7 +53,7 @@ pub fn get_date() -> String {
     let sec = local.second();
     let tz_offset = local.offset().local_minus_utc();
     let sign = if tz_offset < 0 { "-" } else { "" }; // + is not allowed in a snapshot name
-    let tz_offset = tz_offset.abs() as u32;
+    let tz_offset = tz_offset.unsigned_abs();
     let hours = tz_offset / 3600;
     let minutes = (tz_offset / 60) - (hours * 60);
     format!(

@@ -1,4 +1,9 @@
-.PHONY: build test test_help
+.PHONY: check build test test_help
+
+check:
+	cargo fmt --check
+	cargo check
+	cargo clippy
 
 build:
 	cargo build --release
