@@ -16,7 +16,7 @@ pub struct Args {
 
     /// Extra identifier which is included in the snapshot name. Can be used for
     /// replicating to multiple targets.
-    #[arg(long, value_name = "EXTRA")]
+    #[arg(long, value_name = "EXTRA", value_parser = validate_identifier)]
     pub identifier: Option<String>,
 
     /// Also transfers child datasets
@@ -98,4 +98,15 @@ pub struct Args {
     pub source: String,
 
     pub target: String,
+}
+
+fn validate_identifier(value: &str) -> Result<String, &'static str> {
+    fn invalid_char(c: char) -> bool {
+        !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':' || c == '.')
+    }
+    if value.contains(invalid_char) {
+        Err("extra indentifier contains invalid chars!")
+    } else {
+        Ok(value.to_string())
+    }
 }
