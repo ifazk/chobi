@@ -414,7 +414,6 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             };
 
             if self.args.dump_snaps {
-                // TODO: println might be more appropriate
                 for (snapshot, (guid, creation)) in source_snaps.iter() {
                     info!(
                         "got snapshot {snapshot} with guid:{guid} creation:{creation} for {source}"
@@ -446,7 +445,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
         .format_target(false)
         .init();
