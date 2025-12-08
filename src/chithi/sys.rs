@@ -1,5 +1,5 @@
 use chrono::{Datelike, Timelike};
-use std::{ffi, io};
+use std::{ffi, io, process};
 
 // Ah hostnames, what wonderful fun
 // We make some simplifying support decisions here about the size of hostnames.
@@ -59,4 +59,132 @@ pub fn get_date() -> String {
     format!(
         "{year:04}-{mon:02}-{mday:02}:{hour:02}:{min:02}:{sec:02}-GMT{sign}{hours:02}:{minutes:02}"
     )
+}
+
+/// Run command and both prints and captures outputs
+pub fn capture(command: &mut process::Command) -> io::Result<process::Output> {
+    use io::{Read, Write};
+    use process::{ExitStatus, Stdio};
+    use std::os::fd::{AsRawFd, RawFd};
+
+    fn set_flags(fd: libc::c_int, flags: libc::c_int) -> io::Result<()> {
+        unsafe {
+            let ret = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            if ret == -1 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+    fn get_not_blocking_fd<T: AsRawFd>(fd: &T) -> io::Result<RawFd> {
+        let fd = fd.as_raw_fd();
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            set_flags(fd, flags | libc::O_NONBLOCK)?;
+            Ok(fd)
+        }
+    }
+
+    // Helpers for poll
+    fn poll_readable(revents: libc::c_short) -> bool {
+        revents & libc::POLLIN != 0
+    }
+    fn poll_ended(revents: libc::c_short) -> bool {
+        revents & libc::POLLHUP != 0
+    }
+
+    let command = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Buffers
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    // Spawn child and collect outputs
+    let status: ExitStatus = {
+        let mut child = command.spawn()?;
+
+        // Handles that implement Drop
+        let mut child_out = child.stdout.take().expect("child stdout is piped");
+        let mut child_err = child.stderr.take().expect("child stderr is piped");
+
+        // Set child fds to non-blocking
+        let child_out_fd = get_not_blocking_fd(&child_out)?;
+        let child_err_fd = get_not_blocking_fd(&child_err)?;
+
+        // Setup
+        let mut pollfds = [
+            libc::pollfd {
+                fd: child_out_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: child_err_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let mut readbuf = [0u8; 1024];
+        loop {
+            let ret =
+                unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, -1) };
+            if ret == -1 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                } else {
+                    return Err(err);
+                }
+            };
+
+            let mut ended = false;
+            let mut readable = false;
+
+            if poll_readable(pollfds[0].revents) {
+                match child_out.read(&mut readbuf) {
+                    Ok(n) => {
+                        stdout.extend_from_slice(&readbuf[..n]);
+                        io::stdout().write_all(&readbuf[..n])?;
+                        readable = true;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            } else if poll_ended(pollfds[0].revents) {
+                ended = true;
+            }
+
+            if poll_readable(pollfds[1].revents) {
+                match child_err.read(&mut readbuf) {
+                    Ok(n) => {
+                        stderr.extend_from_slice(&readbuf[..n]);
+                        io::stderr().write_all(&readbuf[..n])?;
+                        readable = true;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            } else if poll_ended(pollfds[1].revents) {
+                ended = true;
+            }
+
+            if ended && !readable {
+                break;
+            }
+        }
+
+        child.wait()?
+    };
+
+    Ok(process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }

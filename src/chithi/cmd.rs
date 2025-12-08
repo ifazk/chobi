@@ -18,8 +18,10 @@ use log::{debug, error};
 use std::{
     fmt::Display,
     io,
-    process::{Command, exit},
+    process::{Command, Output, Stdio, exit},
 };
+
+use crate::chithi::sys;
 
 type SshOption = String;
 
@@ -121,20 +123,15 @@ impl<'args> Display for CmdTarget<'args> {
     }
 }
 
-pub struct Cmd<'args> {
+pub struct Cmd<'args, T> {
     target: &'args CmdTarget<'args>,
     sudo: bool,
     base: &'static str,
-    args: &'args [&'args str],
+    args: T,
 }
 
-impl<'args> Cmd<'args> {
-    pub fn new(
-        target: &'args CmdTarget<'args>,
-        sudo: bool,
-        cmd: &'static str,
-        args: &'args [&'args str],
-    ) -> Self {
+impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Cmd<'args, T> {
+    pub fn new(target: &'args CmdTarget<'args>, sudo: bool, cmd: &'static str, args: T) -> Self {
         Self {
             target,
             sudo,
@@ -151,10 +148,14 @@ impl<'args> Cmd<'args> {
         } else {
             self.target.make_cmd(self.base)
         };
-        for arg in self.args {
+        for arg in self.args.as_ref() {
             cmd.arg(arg);
         }
         cmd
+    }
+
+    pub fn to_mut(&self) -> Cmd<'args, Vec<&'cmd str>> {
+        self.into()
     }
 
     pub fn to_check(&self) -> Command {
@@ -169,14 +170,59 @@ impl<'args> Cmd<'args> {
         }
         Ok(())
     }
+
+    /// Run command printing and catputuring output
+    pub fn capture(&self) -> io::Result<Output> {
+        let mut command = self.to_cmd();
+        sys::capture(&mut command)
+    }
+
+    /// Run command inheriting stderr and capturing std output
+    pub fn capture_stdout(&self) -> io::Result<Output> {
+        let mut command = self.to_cmd();
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        command.output()
+    }
 }
 
-impl<'args> Display for Cmd<'args> {
+impl<'args, 'cmd> Cmd<'args, Vec<&'cmd str>> {
+    pub fn arg(&mut self, value: &'cmd str) {
+        self.args.push(value);
+    }
+    pub fn args<T: AsRef<[&'cmd str]>>(&mut self, values: T) {
+        for &value in values.as_ref() {
+            self.args.push(value);
+        }
+    }
+}
+
+impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Cmd<'args, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}{}", self.target, self.base)?;
-        for arg in self.args {
+        for &arg in self.args.as_ref() {
             write!(f, " {}", arg)?;
         }
         Ok(())
+    }
+}
+
+impl<'args, 'cmd, T: AsRef<[&'cmd str]>> From<&Cmd<'args, T>> for Cmd<'args, Vec<&'cmd str>> {
+    fn from(
+        Cmd {
+            target,
+            sudo,
+            base,
+            args,
+        }: &Cmd<'args, T>,
+    ) -> Self {
+        Self {
+            target,
+            sudo: *sudo,
+            base,
+            args: args.as_ref().to_vec(),
+        }
     }
 }

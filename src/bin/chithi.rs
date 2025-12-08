@@ -28,15 +28,15 @@ use std::{
 
 const DOES_NOT_EXIST: &str = "dataset does not exist";
 
-struct CmdConfig<'args> {
-    source_zfs: Cmd<'args>,
-    target_ps: Cmd<'args>,
-    target_zfs: Cmd<'args>,
+struct CmdConfig<'args, 'target> {
+    source_zfs: Cmd<'args, &'target [&'args str]>,
+    target_ps: Cmd<'args, &'target [&'args str]>,
+    target_zfs: Cmd<'args, &'target [&'args str]>,
     args: &'args Args,
     zfs_recv: Regex,
 }
 
-impl<'args> CmdConfig<'args> {
+impl<'args, 'target> CmdConfig<'args, 'target> {
     pub fn new(
         source_cmd_target: &'args CmdTarget<'args>,
         source_is_root: bool,
@@ -44,9 +44,9 @@ impl<'args> CmdConfig<'args> {
         target_is_root: bool,
         args: &'args Args,
     ) -> io::Result<Self> {
-        let source_zfs = Cmd::new(source_cmd_target, !source_is_root, "zfs", &[]);
-        let target_ps = Cmd::new(target_cmd_target, false, "ps", &["-Ao", "args="]);
-        let target_zfs = Cmd::new(target_cmd_target, !target_is_root, "zfs", &[]);
+        let source_zfs = Cmd::new(source_cmd_target, !source_is_root, "zfs", &[][..]);
+        let target_ps = Cmd::new(target_cmd_target, false, "ps", &["-Ao", "args="][..]);
+        let target_zfs = Cmd::new(target_cmd_target, !target_is_root, "zfs", &[][..]);
         if !args.no_command_checks {
             source_zfs.check_exists()?;
             target_ps.check_exists()?;
@@ -121,15 +121,11 @@ impl<'args> CmdConfig<'args> {
 
     fn target_exists(&self, fs: &Fs) -> io::Result<bool> {
         // We don't use get_zfs_value(fs, "name") here to avoid printing the error value
-        let mut target_zfs = self.target_zfs.to_cmd();
+        let mut target_zfs = self.target_zfs.to_mut();
         target_zfs.args(["get", "-H", "name"]);
         target_zfs.arg(fs.fs.as_ref());
-        debug!("checking if target filesystem {fs} exists ...");
-        target_zfs
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let output = target_zfs.output()?;
+        debug!("checking if target filesystem {fs} exists using {target_zfs}...");
+        let output = target_zfs.capture()?;
         if !output.status.success() {
             if output
                 .stderr
@@ -158,7 +154,7 @@ impl<'args> CmdConfig<'args> {
     }
 
     fn get_child_datasets<'a>(&self, fs: &Fs<'a>) -> io::Result<Vec<Fs<'a>>> {
-        let mut source_zfs = self.source_zfs.to_cmd();
+        let mut source_zfs = self.source_zfs.to_mut();
         const LIST_CHILD_DATASET: [&str; 6] = [
             "list",
             "-o",
@@ -169,17 +165,8 @@ impl<'args> CmdConfig<'args> {
         ];
         source_zfs.args(LIST_CHILD_DATASET);
         source_zfs.arg(fs.fs.as_ref());
-        debug!(
-            "getting list of child datasets for {fs} using {} {} {}...",
-            self.source_zfs,
-            LIST_CHILD_DATASET.join(" "),
-            fs.fs
-        );
-        source_zfs
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        let output = source_zfs.output()?;
+        debug!("getting list of child datasets for {fs} using {source_zfs}...");
+        let output = source_zfs.capture_stdout()?;
         if !output.status.success() {
             error!("failed to get child datasets for {fs}");
             exit(1);
@@ -198,7 +185,7 @@ impl<'args> CmdConfig<'args> {
         Ok(children)
     }
 
-    fn pick_zfs(&self, role: Role) -> &Cmd<'args> {
+    fn pick_zfs(&self, role: Role) -> &Cmd<'args, &'target [&'args str]> {
         match role {
             Role::Source => &self.source_zfs,
             Role::Target => &self.target_zfs,
@@ -207,13 +194,10 @@ impl<'args> CmdConfig<'args> {
 
     /// Returns ErrorKind::NotFound if dataset does not exist
     fn get_zfs_value(&self, fs: &Fs, property: &str) -> io::Result<String> {
-        debug!("getting current value of {property} on {fs}");
-        let mut zfs = self.pick_zfs(fs.role).to_cmd();
-        zfs.args(["get", "-H", property, &fs.fs])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let output = zfs.output()?;
+        let mut zfs = self.pick_zfs(fs.role).to_mut();
+        zfs.args(["get", "-H", property, &fs.fs]);
+        debug!("getting current value of {property} on {fs} using {zfs}...");
+        let output = zfs.capture()?;
         // Output err since we're not inheriting
         io::stderr().write_all(&output.stderr)?;
 
@@ -250,11 +234,7 @@ impl<'args> CmdConfig<'args> {
     }
 
     fn get_snaps(&self, fs: &Fs) -> io::Result<HashMap<String, (String, String)>> {
-        debug!(
-            "getting list of snapshots on {fs} using zfs get -Hpd 1 -t snapshot guid,creation {}",
-            fs.fs
-        );
-        let mut zfs = self.pick_zfs(fs.role).to_cmd();
+        let mut zfs = self.pick_zfs(fs.role).to_mut();
         zfs.args([
             "get",
             "-Hpd",
@@ -263,10 +243,12 @@ impl<'args> CmdConfig<'args> {
             "snapshot",
             "guid,creation",
             &fs.fs,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+        ]);
+        debug!("getting list of snapshots on {fs} using {zfs}",);
+        let mut zfs = zfs.to_cmd();
+        zfs.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
         let mut zfs_process = zfs.spawn()?;
 
         // the output will have guids and creation on separate lines
@@ -347,15 +329,13 @@ impl<'args> CmdConfig<'args> {
             "chithi_{}{hostname}_{date}",
             self.args.identifier.as_deref().unwrap_or_default()
         );
+        // TODO skip creating snap if snap_name will be excluded
         let fs_snapshot = format!("{}@{snap_name}", fs.fs);
         if !self.args.dry_run {
-            let mut zfs = self.pick_zfs(fs.role).to_cmd();
-            zfs.args(["snapshot", fs_snapshot.as_str()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit());
+            let mut zfs = self.pick_zfs(fs.role).to_mut();
+            zfs.args(["snapshot", fs_snapshot.as_str()]);
             debug!("creating sync snapshot using zfs snapshot {fs_snapshot}...");
-            let output = zfs.output()?;
+            let output = zfs.capture_stdout()?;
 
             if !output.status.success() {
                 error!("failed to create snapshot {fs_snapshot}");
@@ -478,6 +458,8 @@ fn main() -> io::Result<()> {
         get_is_roots(source.host, target.host, args.no_privilege_elevation);
 
     trace!("built fs");
+
+    // TODO get ssh master
 
     // Build command targets
     let source_cmd_target = CmdTarget::new(source.host, &args.ssh_options);
