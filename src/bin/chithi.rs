@@ -15,13 +15,14 @@
 //  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use chobi::AutoKill;
-use chobi::chithi::sys::{get_date, hostname};
-use chobi::chithi::{Args, Cmd, CmdTarget, Fs, Role, get_is_roots, sys};
+use chobi::chithi::sys::{get_date, hostname, pipe_and_capture_stderr};
+use chobi::chithi::util::ReadableBytes;
+use chobi::chithi::{Args, Cmd, CmdTarget, Fs, Pipeline, Role, get_is_roots, sys};
 use clap::Parser;
 use log::{debug, error, info, trace, warn};
 use regex_lite::Regex;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, BufRead, BufReader, Write},
     process::{Stdio, exit},
 };
@@ -29,9 +30,13 @@ use std::{
 const DOES_NOT_EXIST: &str = "dataset does not exist";
 
 struct CmdConfig<'args, 'target> {
+    source_cmd_target: &'args CmdTarget<'args>,
+    target_cmd_target: &'args CmdTarget<'args>,
     source_zfs: Cmd<'args, &'target [&'args str]>,
     target_ps: Cmd<'args, &'target [&'args str]>,
     target_zfs: Cmd<'args, &'target [&'args str]>,
+    _optional_cmds: HashMap<&'static str, Cmd<'args, &'target [&'args str]>>,
+    _optional_features: HashSet<&'static str>,
     args: &'args Args,
     zfs_recv: Regex,
 }
@@ -51,7 +56,12 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             source_zfs.check_exists()?;
             target_ps.check_exists()?;
             target_zfs.check_exists()?;
+            // sh is a posix standard, so we don't need to check
         }
+        // TODO
+        let optional_cmds = HashMap::new();
+        // TODO
+        let optional_features = HashSet::new();
         // precompile zfs_recv regex
         let zfs_recv = {
             // In syncoid they use this regex:
@@ -64,12 +74,20 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         };
 
         Ok(Self {
+            source_cmd_target,
+            target_cmd_target,
             source_zfs,
             target_ps,
             target_zfs,
+            _optional_features: optional_features,
+            _optional_cmds: optional_cmds,
             args,
             zfs_recv,
         })
+    }
+
+    pub fn stream_arg(&self) -> &'static str {
+        if self.args.no_stream { "-i" } else { "-I" }
     }
 
     pub fn check_ssh_if_needed(
@@ -233,6 +251,199 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         Ok(value.to_string())
     }
 
+    /// Will fail for dry-run sync-snaps, so special case that instead of using this
+    fn get_send_size(&self, source: &str, other: Option<&str>) -> io::Result<u64> {
+        let is_recv_token = source.starts_with("-t ");
+        let send_options = if is_recv_token {
+            self.args.send_options.filter_allowed(&['V', 'e'])
+        } else {
+            self.args
+                .send_options
+                .filter_allowed(&['L', 'V', 'R', 'X', 'b', 'c', 'e', 'h', 'p', 's', 'w'])
+        };
+
+        let from_to = if let Some(other) = other {
+            vec![self.stream_arg(), source, other]
+        } else if let Some(source) = source.strip_prefix("-t ") {
+            vec!["-t", source]
+        } else {
+            vec![source]
+        };
+
+        let mut source_zfs = self.source_zfs.to_mut();
+        source_zfs.arg("send");
+        source_zfs.args(send_options);
+        source_zfs.arg("-nvP");
+        source_zfs.args(from_to);
+        debug!("getting estimated transfer size from source using {source_zfs}...");
+        let output = source_zfs.capture_stdout()?;
+        if !output.status.success() {
+            error!("failed to get estimated size for {source}");
+            exit(1);
+        };
+        let output = String::from_utf8_lossy(&output.stdout);
+        // The last line of the multiline output is the size, but we need to
+        // remove the human readable portions before parsing
+        let send_size = output.trim().lines().last();
+        let send_size = send_size
+            .and_then(|send_size| {
+                send_size
+                    .rsplit_terminator(|c: char| !c.is_ascii_digit())
+                    .next()
+            })
+            .map(str::trim)
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|send_size| if send_size < 4096 { 4096 } else { send_size }) // to avoid confusion with zero size pv, give minimum 4K size;
+            .unwrap_or_default();
+        debug!("got estimated transfer size of {send_size}");
+        Ok(send_size)
+    }
+
+    // We build one or two shell pipes, depending on whether the hosts are the same or not
+    fn build_sync_pipelines<'cmd, T: AsRef<[&'cmd str]>>(
+        &self,
+        send_cmd: Cmd<'args, T>,
+        recv_cmd: Cmd<'args, T>,
+        _pv_size: u64,
+    ) -> (Pipeline<'args, T>, Option<Pipeline<'args, T>>) {
+        let mut source_pipeline = Pipeline::new(self.source_cmd_target, send_cmd);
+        let mut target_pipeline_maybe = None;
+        if self.source_cmd_target == self.target_cmd_target {
+            // both local or same host and same user
+            // TODO add commands
+            source_pipeline.add_cmd(recv_cmd);
+        } else if self.source_cmd_target.is_remote() && !self.target_cmd_target.is_remote() {
+            // pull
+            // TODO add commands
+            let target_pipeline = Pipeline::new(self.target_cmd_target, recv_cmd);
+            target_pipeline_maybe = Some(target_pipeline);
+        } else if !self.source_cmd_target.is_remote() && self.target_cmd_target.is_remote() {
+            // push
+            // TODO add commands
+            let target_pipeline = Pipeline::new(self.target_cmd_target, recv_cmd);
+            target_pipeline_maybe = Some(target_pipeline);
+        } else {
+            // both remote with different hosts or different users
+            // TODO add commands
+            let target_pipeline = Pipeline::new(self.target_cmd_target, recv_cmd);
+            target_pipeline_maybe = Some(target_pipeline);
+        }
+        (source_pipeline, target_pipeline_maybe)
+    }
+
+    fn run_sync_cmd(
+        &self,
+        _source: &Fs,
+        send_source: String,
+        target: &Fs,
+        pv_size: u64,
+    ) -> io::Result<()> {
+        let _disp_pv_size = ReadableBytes::from(pv_size);
+        let send_options = if send_source.starts_with("-t ") {
+            self.args
+                .send_options
+                .filter_allowed(&['P', 'V', 'e', 'v'][..])
+        } else if send_source.contains('#') {
+            self.args
+                .send_options
+                .filter_allowed(&['L', 'V', 'c', 'e', 'w'][..])
+        } else {
+            self.args.send_options.filter_allowed(
+                &[
+                    'L', 'P', 'V', 'R', 'X', 'b', 'c', 'e', 'h', 'p', 's', 'v', 'w',
+                ][..],
+            )
+        };
+
+        let mut recv_options = self
+            .args
+            .recv_options
+            .filter_allowed(&['h', 'o', 'x', 'u', 'v']);
+
+        // save state on interrupted stream
+        if !self.args.no_resume {
+            recv_options.push("-s");
+        }
+        // if rollbacks aren't allowed, disable forced recv
+        if !self.args.no_rollback {
+            recv_options.push("-F");
+        }
+
+        // TODO preserve properties (user properties are pretty much the only thing that needs escaping since they are arbitrary strings)
+        // TODO preserve recordsize
+
+        let send_cmd = {
+            let mut args = Vec::from(["send"]);
+            args.extend(send_options);
+            args.push(&send_source);
+            Cmd::new(&CmdTarget::Local, false, "zfs", args)
+        };
+        let recv_cmd = {
+            let mut args = Vec::from(["receive"]);
+            args.extend(recv_options);
+            args.push(&target.fs);
+            Cmd::new(&CmdTarget::Local, false, "zfs", args)
+        };
+        let pipelines = self.build_sync_pipelines(send_cmd, recv_cmd, pv_size);
+        if self.is_zfs_busy(target)? {
+            warn!("Cannot sync now: {target} is already target of a zfs recv process");
+            exit(1);
+        }
+        if self.args.dry_run {
+            if let Some(other_pipeline) = pipelines.1 {
+                debug!(
+                    "dry-run not running pipelines '{}' | '{}'...",
+                    pipelines.0, other_pipeline
+                );
+            } else {
+                debug!("dry-run not running pipelines {}...", pipelines.0);
+            }
+            return Ok(());
+        }
+        match &pipelines {
+            (pipeline, None) => {
+                let mut cmd = pipeline.to_cmd();
+                let output = cmd
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::piped())
+                    .output()?;
+                if !output.status.success() {
+                    let err = String::from_utf8_lossy(&output.stderr);
+                    return Err(io::Error::other(err));
+                }
+            }
+            (source_pipeline, Some(target_pipeline)) => {
+                debug!("source pipeline: {source_pipeline}");
+                let mut source_cmd = source_pipeline.to_cmd();
+                debug!("target pipeline: {target_pipeline}");
+                let mut target_cmd = target_pipeline.to_cmd();
+                let (source_output, target_output) =
+                    pipe_and_capture_stderr(&mut source_cmd, &mut target_cmd)?;
+                if !source_output.status.success() || !target_output.status.success() {
+                    // We've already output the errors, but let's distinguish
+                    // between source and target errors here
+                    let source_err = String::from_utf8_lossy(&source_output.stderr);
+                    let target_err = String::from_utf8_lossy(&target_output.stderr);
+                    let mut err = "source errors:\n".to_string();
+                    err.push_str(&source_err);
+                    err.push_str(&format!("\nsource status: {}\n", source_output.status));
+                    err.push_str("\ntarget errors:\n");
+                    err.push_str(&target_err);
+                    err.push_str(&format!("\target status: {}\n", target_output.status));
+                    return Err(io::Error::other(err));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn sync_resume(&self, source: &Fs, target: &Fs, recv_token: String) -> io::Result<()> {
+        let send_source = format!("-t {recv_token}");
+        let pv_size = self.get_send_size(&send_source, None)?;
+        self.run_sync_cmd(source, send_source, target, pv_size)
+    }
+
     fn get_snaps(&self, fs: &Fs) -> io::Result<HashMap<String, (String, String)>> {
         let mut zfs = self.pick_zfs(fs.role).to_mut();
         zfs.args([
@@ -322,19 +533,44 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         Ok(snapshots)
     }
 
-    fn new_sync_snap(&self, fs: &Fs) -> io::Result<String> {
+    fn snap_is_included(&self, snap_name: &str) -> bool {
+        if !self.args.exclude_snaps.is_empty() {
+            for exclude in self.args.exclude_snaps.iter() {
+                if exclude.is_match(snap_name) {
+                    debug!("excluded {snap_name} because of exclude pattern {exclude}");
+                    return false;
+                }
+            }
+        }
+        // Empty means include everything
+        if self.args.include_snaps.is_empty() {
+            return true;
+        }
+        // Non empty means selectively include
+        for include in self.args.include_snaps.iter() {
+            if include.is_match(snap_name) {
+                debug!("included {snap_name} because of exclude pattern {include}");
+                return true;
+            }
+        }
+        false
+    }
+
+    fn new_sync_snap(&self, fs: &Fs) -> io::Result<Option<String>> {
         let hostname = hostname()?;
         let date = get_date();
         let snap_name = format!(
             "chithi_{}{hostname}_{date}",
             self.args.identifier.as_deref().unwrap_or_default()
         );
-        // TODO skip creating snap if snap_name will be excluded
+        if !self.snap_is_included(&snap_name) {
+            return Ok(None);
+        }
         let fs_snapshot = format!("{}@{snap_name}", fs.fs);
         if !self.args.dry_run {
             let mut zfs = self.pick_zfs(fs.role).to_mut();
             zfs.args(["snapshot", fs_snapshot.as_str()]);
-            debug!("creating sync snapshot using zfs snapshot {fs_snapshot}...");
+            debug!("creating sync snapshot using {zfs}...");
             let output = zfs.capture_stdout()?;
 
             if !output.status.success() {
@@ -344,7 +580,27 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         } else {
             debug!("dry-run not running zfs snapshot {fs_snapshot}...");
         };
-        Ok(snap_name)
+        Ok(Some(snap_name))
+    }
+
+    fn newest_sync_snap<'a>(
+        &self,
+        source_snaps: &'a HashMap<String, (String, String)>,
+    ) -> Option<&'a String> {
+        let mut snap_name_creation = None;
+        for (snap_name, (_, creation)) in source_snaps {
+            if snap_name_creation.is_none() {
+                snap_name_creation = Some((snap_name, creation));
+                continue;
+            }
+            let (seen_snap_name, seen_creation) =
+                snap_name_creation.as_mut().expect("checked is_none");
+            if seen_creation.as_str() < creation {
+                *seen_snap_name = snap_name;
+                *seen_creation = creation;
+            }
+        }
+        snap_name_creation.map(|(snap_name, _creation)| snap_name)
     }
 
     // skip_sync_snapshot is set to true for these senarios
@@ -389,6 +645,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         // Check if target exists
         let target_exists = self.target_exists(target)?;
 
+        #[allow(unused_variables)]
         let recv_token = if target_exists && !self.args.no_resume {
             let recv_token = self.get_resume_token(target)?;
             if let Some(recv_token) = recv_token.as_ref() {
@@ -399,41 +656,43 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             None
         };
 
-        'snapshot_checking: {
-            // skip snapshot checking/creation in case of resumed recv
-            // TODO figure out how to avoid the recursive call, and just handle
-            // the resume first
-            if recv_token.is_some() {
-                break 'snapshot_checking;
-            }
-            let source_snaps = self.get_snaps(source)?;
-            let target_snaps = if target_exists {
-                Some(self.get_snaps(target)?)
-            } else {
-                None
-            };
+        // we handle the resume first
+        if let Some(recv_token) = recv_token {
+            self.sync_resume(source, target, recv_token)?
+        }
 
-            if self.args.dump_snaps {
-                for (snapshot, (guid, creation)) in source_snaps.iter() {
+        let source_snaps = self.get_snaps(source)?;
+        let target_snaps = if target_exists {
+            Some(self.get_snaps(target)?)
+        } else {
+            None
+        };
+
+        if self.args.dump_snaps {
+            for (snapshot, (guid, creation)) in source_snaps.iter() {
+                info!("got snapshot {snapshot} with guid:{guid} creation:{creation} for {source}")
+            }
+            if let Some(target_snaps) = target_snaps.as_ref() {
+                for (snapshot, (guid, creation)) in target_snaps {
                     info!(
-                        "got snapshot {snapshot} with guid:{guid} creation:{creation} for {source}"
+                        "got snapshot {snapshot} with guid:{guid} creation:{creation} for {target}"
                     )
                 }
-                if let Some(target_snaps) = target_snaps.as_ref() {
-                    for (snapshot, (guid, creation)) in target_snaps {
-                        info!(
-                            "got snapshot {snapshot} with guid:{guid} creation:{creation} for {target}"
-                        )
-                    }
-                };
-            }
-
-            if !self.args.no_sync_snap && !skip_sync_snapshot {
-                let new_sync_snap = self.new_sync_snap(source)?;
-                // TODO remove debug
-                debug!("created new sync snap {new_sync_snap}")
-            }
+            };
         }
+
+        // TODO remove allow
+        #[allow(unused_variables)]
+        let newest_sync_snapshot = if !self.args.no_sync_snap && !skip_sync_snapshot {
+            let new_sync_snap = self.new_sync_snap(source)?;
+            if new_sync_snap.is_none() {
+                self.newest_sync_snap(&source_snaps).cloned()
+            } else {
+                new_sync_snap
+            }
+        } else {
+            self.newest_sync_snap(&source_snaps).cloned()
+        };
 
         // TODO
         debug!("syncing datasets is not implemented yet");
@@ -444,6 +703,8 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
+
+    // TODO: validate send and recv options and conflicts
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)

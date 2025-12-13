@@ -1,8 +1,9 @@
+use crate::chithi::send_recv_opts::{OptionsLine, Opts};
+use bw::Bytes;
 use clap::Parser;
 use regex_lite::Regex;
 
 mod bw;
-use bw::Bytes;
 
 /// ZFS snapshot replication tool
 #[derive(Parser, Debug)]
@@ -43,9 +44,17 @@ pub struct Args {
     #[arg(long, default_value = "-p -t -e -r -b", value_name = "OPTIONS")]
     pub pv_options: String,
 
+    /// Replicates using newest snapshot instead of intermediates
+    #[arg(long)]
+    pub no_stream: bool,
+
     /// Does not create new snapshot, only transfers existing
     #[arg(long)]
     pub no_sync_snap: bool,
+
+    /// Does not rollback snapshots on target (it probably requires a readonly target)
+    #[arg(long)]
+    pub no_rollback: bool,
 
     /// Exclude specific snapshots that match the given regular expression. Can be specified multiple times. If a snapshot matches both exclude-snaps and include-snaps patterns, then it will be excluded.
     #[arg(long, value_name = "REGEX")]
@@ -55,13 +64,13 @@ pub struct Args {
     #[arg(long, value_name = "REGEX")]
     pub include_snaps: Vec<Regex>,
 
-    /// Use advanced options for zfs send (the arguments are filtered as needed), e.g. syncoid --sendoptions="Lc e" sets zfs send -L -c -e ...
-    #[arg(long, value_name = "OPTIONS")]
-    pub sendoptions: Option<String>,
+    /// Use advanced options for zfs send (the arguments are filtered as needed), e.g. chithi --send-options="Lc e" sets zfs send -L -c -e ...
+    #[arg(long, value_name = "OPTIONS", value_parser = Opts::try_from_str, default_value_t)]
+    pub send_options: Opts<Vec<OptionsLine<String>>>,
 
-    /// Use advanced options for zfs receive (the arguments are filtered as needed), e.g. syncoid --recvoptions="ux recordsize o compression=lz4" sets zfs receive -u -x recordsize -o compression=lz4 ...
-    #[arg(long, value_name = "OPTIONS")]
-    pub recvoptions: Option<String>,
+    /// Use advanced options for zfs receive (the arguments are filtered as needed), e.g. chithi --recv-options="ux recordsize o compression=lz4" sets zfs receive -u -x recordsize -o compression=lz4 ...
+    #[arg(long, value_name = "OPTIONS", value_parser = Opts::try_from_str, default_value_t)]
+    pub recv_options: Opts<Vec<OptionsLine<String>>>,
 
     /// Passes OPTION to ssh for remote usage. Can be specified multiple times
     #[arg(short = 'o', long = "sshoption", value_name = "OPTION")]

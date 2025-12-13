@@ -25,7 +25,7 @@ solaris.
 6. Chithi: We use the regex-lite crate for rexeg, and therefore do not support
 unicode case insensitivity or unicode character classes like `\p{Letter}`.
 
-# Why Rust?
+# Why Rust? Why Not Go?
 There are no technical or social reasons why I'm choosing Rust. Go would have
 been a better option, which I also have some experience with. But I just happen
 to be mainly using Rust right now, and so things will be quicker to implement on
@@ -44,3 +44,28 @@ direction, or if the updates here are too slow.
 # Reporting issues
 This project is not accepting any issues. I plan on opening up issues once
 enough functionality is implemented.
+
+# Plans
+One of the main things I'm planning on is a deaemon for `chithi` for nightly
+pushes/pulls.
+
+I currently use systemd timers/services, but they can only have one argument (or
+you have to deal with some messy escaping and parsing).  So my current work flow
+looks like this:
+
+- Have default push/pull services that push/pull to/from a single remote pool.
+(e.g. syncoid-push-tank-rpool@.service syncoid-pull-tank-rpool@.service)
+
+- For each pair of pools that need to sync, add another set of services (e.g.
+syncoid-push-tank-rpool@.service syncoid-pull-tank-rpool@.service).
+
+- For datasets that need to be renamed when transfering, add yet another set of
+services (e.g.  syncoid-push-tank-rpool-dataset.service
+syncoid-pull-tank-rpool-dataset.service). The last one is extra relevant for
+proxmox, on the pull side `subvol-104-disk-0` is a meaningless name and likely to
+conflict with subvols of other servers.
+
+This works and I even backup all the syncoid*.{service,timer} files! And it
+works reall well because systemd is very robust! But every new non-default pool
+and ever new renaming gets tedius. I want a single configurating file where I
+put everything down.

@@ -20,9 +20,12 @@
 mod args;
 mod cmd;
 mod fs;
+pub mod send_recv_opts;
 pub mod sys;
+pub mod util;
 
 pub use args::Args;
 pub use cmd::Cmd;
 pub use cmd::CmdTarget;
+pub use cmd::Pipeline;
 pub use fs::{Fs, Role, get_is_roots};

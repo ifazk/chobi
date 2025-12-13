@@ -25,6 +25,7 @@ use crate::chithi::sys;
 
 type SshOption = String;
 
+#[derive(PartialEq, Eq)]
 pub struct Ssh<'args> {
     host: &'args str,
     options: &'args Vec<SshOption>,
@@ -44,6 +45,7 @@ impl<'args> Ssh<'args> {
     }
 }
 
+#[derive(PartialEq, Eq)]
 pub enum CmdTarget<'args> {
     Local,
     Remote { ssh: Ssh<'args> },
@@ -117,6 +119,7 @@ impl<'args> Display for CmdTarget<'args> {
                 for option in ssh.options {
                     write!(f, "-o {} ", option)?;
                 }
+                write!(f, "{} ", ssh.host)?;
             }
         };
         Ok(())
@@ -201,7 +204,8 @@ impl<'args, 'cmd> Cmd<'args, Vec<&'cmd str>> {
 
 impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Cmd<'args, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}{}", self.target, self.base)?;
+        let sudo = if self.sudo { "sudo " } else { "" };
+        write!(f, "{}{}{}", self.target, sudo, self.base)?;
         for &arg in self.args.as_ref() {
             write!(f, " {}", arg)?;
         }
@@ -224,5 +228,82 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> From<&Cmd<'args, T>> for Cmd<'args, Vec
             base,
             args: args.as_ref().to_vec(),
         }
+    }
+}
+
+pub struct Pipeline<'args, T> {
+    target: &'args CmdTarget<'args>,
+    cmds: Vec<Cmd<'args, T>>,
+}
+
+impl<'args, T> Pipeline<'args, T> {
+    pub fn new(target: &'args CmdTarget<'args>, cmd: Cmd<'args, T>) -> Self {
+        Self {
+            target,
+            cmds: vec![cmd],
+        }
+    }
+    pub fn add_cmd(&mut self, cmd: Cmd<'args, T>) {
+        self.cmds.push(cmd);
+    }
+}
+
+impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Pipeline<'args, T> {
+    pub fn to_cmd(&self) -> Command {
+        match self.target {
+            CmdTarget::Local => {
+                let mut cmd = Command::new("sh");
+                cmd.args(["-c", "--"]);
+                if let Some(inner) = self.cmds.first() {
+                    use std::fmt::Write;
+                    let mut arg = String::new();
+                    write!(arg, "{inner}").expect("formatting should not fail");
+                    for inner in &self.cmds[1..] {
+                        write!(arg, "| {inner}").expect("formatting should not fail");
+                    }
+                    cmd.arg(arg);
+                };
+                cmd
+            }
+            CmdTarget::Remote { ssh } => {
+                let mut cmd = Command::new("ssh");
+                for option in ssh.options {
+                    cmd.args(["-o", option]);
+                }
+                cmd.arg(ssh.host);
+                if let Some(inner) = self.cmds.first() {
+                    cmd.arg(format!("{inner}"));
+                    for inner in &self.cmds[1..] {
+                        cmd.arg("|");
+                        cmd.arg(format!("{inner}"));
+                    }
+                };
+                cmd
+            }
+        }
+    }
+}
+
+impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Pipeline<'args, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.target {
+            CmdTarget::Local => {
+                write!(f, "sh -c -- ")?;
+            }
+            CmdTarget::Remote { ssh } => {
+                write!(f, "ssh ")?;
+                for option in ssh.options {
+                    write!(f, "-o {} ", option)?;
+                }
+                write!(f, "{} ", ssh.host)?;
+            }
+        }
+        if let Some(cmd) = self.cmds.first() {
+            write!(f, "{}", cmd)?;
+            for cmd in &self.cmds[1..] {
+                write!(f, "| {}", cmd)?;
+            }
+        }
+        Ok(())
     }
 }

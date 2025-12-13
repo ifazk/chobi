@@ -1,4 +1,5 @@
 use chrono::{Datelike, Timelike};
+use std::os::fd::{AsRawFd, RawFd};
 use std::{ffi, io, process};
 
 // Ah hostnames, what wonderful fun
@@ -61,40 +62,40 @@ pub fn get_date() -> String {
     )
 }
 
+// Utility functions for captures
+fn set_flags(fd: libc::c_int, flags: libc::c_int) -> io::Result<()> {
+    unsafe {
+        let ret = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        if ret == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+fn get_not_blocking_fd<T: AsRawFd>(fd: &T) -> io::Result<RawFd> {
+    let fd = fd.as_raw_fd();
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        set_flags(fd, flags | libc::O_NONBLOCK)?;
+        Ok(fd)
+    }
+}
+
+// Helpers for poll
+fn poll_readable(revents: libc::c_short) -> bool {
+    revents & libc::POLLIN != 0
+}
+fn poll_ended(revents: libc::c_short) -> bool {
+    revents & libc::POLLHUP != 0
+}
+
 /// Run command and both prints and captures outputs
 pub fn capture(command: &mut process::Command) -> io::Result<process::Output> {
     use io::{Read, Write};
     use process::{ExitStatus, Stdio};
-    use std::os::fd::{AsRawFd, RawFd};
-
-    fn set_flags(fd: libc::c_int, flags: libc::c_int) -> io::Result<()> {
-        unsafe {
-            let ret = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-            if ret == -1 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-        Ok(())
-    }
-    fn get_not_blocking_fd<T: AsRawFd>(fd: &T) -> io::Result<RawFd> {
-        let fd = fd.as_raw_fd();
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            if flags == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            set_flags(fd, flags | libc::O_NONBLOCK)?;
-            Ok(fd)
-        }
-    }
-
-    // Helpers for poll
-    fn poll_readable(revents: libc::c_short) -> bool {
-        revents & libc::POLLIN != 0
-    }
-    fn poll_ended(revents: libc::c_short) -> bool {
-        revents & libc::POLLHUP != 0
-    }
 
     let command = command
         .stdin(Stdio::null())
@@ -118,7 +119,7 @@ pub fn capture(command: &mut process::Command) -> io::Result<process::Output> {
         let child_err_fd = get_not_blocking_fd(&child_err)?;
 
         // Setup
-        let mut pollfds = [
+        let mut pollfds = vec![
             libc::pollfd {
                 fd: child_out_fd,
                 events: libc::POLLIN,
@@ -130,8 +131,13 @@ pub fn capture(command: &mut process::Command) -> io::Result<process::Output> {
                 revents: 0,
             },
         ];
+        let mut idx_map = (0..pollfds.len()).collect::<Vec<_>>();
+        let mut remove_buffer = Vec::new();
         let mut readbuf = [0u8; 1024];
         loop {
+            if pollfds.is_empty() {
+                break;
+            }
             let ret =
                 unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, -1) };
             if ret == -1 {
@@ -143,39 +149,46 @@ pub fn capture(command: &mut process::Command) -> io::Result<process::Output> {
                 }
             };
 
-            let mut ended = false;
-            let mut readable = false;
-
-            if poll_readable(pollfds[0].revents) {
-                match child_out.read(&mut readbuf) {
-                    Ok(n) => {
-                        stdout.extend_from_slice(&readbuf[..n]);
-                        io::stdout().write_all(&readbuf[..n])?;
-                        readable = true;
+            for (pollfd_idx, pollfd) in pollfds.iter().enumerate() {
+                let idx = idx_map[pollfd_idx];
+                if idx == 0 {
+                    // child_out
+                    if poll_readable(pollfd.revents) {
+                        match child_out.read(&mut readbuf) {
+                            Ok(n) => {
+                                stdout.extend_from_slice(&readbuf[..n]);
+                                io::stdout().write_all(&readbuf[..n])?;
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                            Err(e) => return Err(e),
+                        }
+                    } else if poll_ended(pollfd.revents) {
+                        remove_buffer.push(pollfd_idx);
                     }
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
+                } else {
+                    // child_err
+                    if poll_readable(pollfd.revents) {
+                        match child_err.read(&mut readbuf) {
+                            Ok(n) => {
+                                stderr.extend_from_slice(&readbuf[..n]);
+                                io::stderr().write_all(&readbuf[..n])?;
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                            Err(e) => return Err(e),
+                        }
+                    } else if poll_ended(pollfd.revents) {
+                        remove_buffer.push(pollfd_idx);
+                    }
                 }
-            } else if poll_ended(pollfds[0].revents) {
-                ended = true;
             }
 
-            if poll_readable(pollfds[1].revents) {
-                match child_err.read(&mut readbuf) {
-                    Ok(n) => {
-                        stderr.extend_from_slice(&readbuf[..n]);
-                        io::stderr().write_all(&readbuf[..n])?;
-                        readable = true;
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
+            if !remove_buffer.is_empty() {
+                // sort so that removing later elements do not move earlier elements
+                remove_buffer.sort();
+                while let Some(idx) = remove_buffer.pop() {
+                    pollfds.remove(idx);
+                    idx_map.remove(idx);
                 }
-            } else if poll_ended(pollfds[1].revents) {
-                ended = true;
-            }
-
-            if ended && !readable {
-                break;
             }
         }
 
@@ -187,4 +200,180 @@ pub fn capture(command: &mut process::Command) -> io::Result<process::Output> {
         stdout,
         stderr,
     })
+}
+
+pub fn try_terminate_if_running(child: &mut process::Child) -> io::Result<()> {
+    match child.try_wait() {
+        Ok(None) => {
+            let id = child.id();
+            unsafe {
+                let ret = libc::kill(id as libc::pid_t, libc::SIGTERM);
+                if ret == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Run command and both prints and captures outputs
+pub fn pipe_and_capture_stderr(
+    main: &mut process::Command,
+    other: &mut process::Command,
+) -> io::Result<(process::Output, process::Output)> {
+    use process::Stdio;
+
+    let main = main
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut main_child = main.spawn()?;
+
+    let other = other
+        .stdin(Stdio::from(
+            main_child.stdout.take().expect("stdout is piped"),
+        ))
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::piped());
+
+    let mut other_child = match other.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = try_terminate_if_running(&mut main_child);
+            main_child.wait()?;
+            return Err(e);
+        }
+    };
+
+    // Handles that implement Drop
+    let main_err = main_child.stderr.take().expect("child stdout is piped");
+    let other_err = other_child.stderr.take().expect("child stderr is piped");
+
+    let mut children = vec![main_child, other_child];
+
+    // Setup
+    let mut outputs = read_until_hup(
+        &mut children,
+        &mut [main_err, other_err],
+        4096,
+        io::stderr(),
+    )?;
+
+    let other = outputs.pop().expect("lengths should match");
+    let other = process::Output {
+        status: other.1,
+        stdout: Vec::new(),
+        stderr: other.0,
+    };
+    let main = outputs.pop().expect("lengths should match");
+    let main = process::Output {
+        status: main.1,
+        stdout: Vec::new(),
+        stderr: main.0,
+    };
+
+    Ok((main, other))
+}
+
+/// This uses poll, so keep `reads` small in length.
+/// Keeps reading from reads until one of the fds in reads disconnects.
+/// Note: Does blocking writes on our_output.
+pub fn read_until_hup<T: io::Read + AsRawFd, S: io::Write>(
+    children: &mut [std::process::Child],
+    reads: &mut [T],
+    buf_size: usize,
+    mut our_output: S,
+) -> io::Result<Vec<(Vec<u8>, process::ExitStatus)>> {
+    let mut statuses = vec![None; children.len()];
+    // Set child fds to non-blocking
+    let fds = reads
+        .iter()
+        .map(|t| get_not_blocking_fd(t))
+        .collect::<io::Result<Vec<_>>>()?;
+
+    // Setup
+    let mut pollfds = fds
+        .iter()
+        .map(|&fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect::<Vec<_>>();
+    let mut idx_map = (0..reads.len()).collect::<Vec<_>>();
+    let mut readbuf = vec![0u8; buf_size];
+    let mut outputs = vec![Vec::new(); reads.len()];
+    let mut failed = false;
+    let timeout: libc::c_int = -1;
+    let mut remove_buffer = Vec::new();
+    loop {
+        if pollfds.is_empty() {
+            break;
+        };
+        let ret =
+            unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, timeout) };
+        if ret == -1 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            } else {
+                return Err(err);
+            }
+        };
+
+        for (pollfd_idx, pollfd) in pollfds.iter().enumerate() {
+            let idx = idx_map[pollfd_idx];
+            if poll_readable(pollfd.revents) {
+                match reads[idx].read(&mut readbuf) {
+                    Ok(n) => {
+                        outputs[idx].extend_from_slice(&readbuf[..n]);
+                        our_output.write_all(&readbuf[..n])?;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            } else if poll_ended(pollfd.revents) && statuses[idx].is_none() {
+                let status = children[idx].wait()?;
+                if !status.success() {
+                    failed = true;
+                };
+                statuses[idx] = Some(status);
+                remove_buffer.push(pollfd_idx);
+            }
+        }
+
+        if !remove_buffer.is_empty() {
+            // sort so that removing later elements do not move earlier elements
+            remove_buffer.sort();
+            while let Some(idx) = remove_buffer.pop() {
+                pollfds.remove(idx);
+                idx_map.remove(idx);
+            }
+        }
+
+        if failed {
+            break;
+        }
+    }
+
+    if failed {
+        for idx in 0..statuses.len() {
+            if statuses[idx].is_none() {
+                let _ = try_terminate_if_running(&mut children[idx]);
+                let status = children[idx].wait()?;
+                statuses[idx] = Some(status);
+            }
+        }
+    }
+
+    let statuses = statuses
+        .into_iter()
+        .map(|status| status.expect("filled in nones"));
+
+    let output_statuses = outputs.into_iter().zip(statuses).collect::<Vec<_>>();
+
+    Ok(output_statuses)
 }
