@@ -15,7 +15,7 @@
 //  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use chobi::AutoKill;
-use chobi::chithi::sys::{get_date, hostname, pipe_and_capture_stderr};
+use chobi::chithi::sys::{get_syncoid_date, hostname, pipe_and_capture_stderr};
 use chobi::chithi::util::ReadableBytes;
 use chobi::chithi::{Args, Cmd, CmdTarget, Fs, Pipeline, Role, get_is_roots, sys};
 use clap::Parser;
@@ -98,6 +98,8 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         })
     }
 
+    // TODO: this is kinda fragile
+    /// Chooses the type of replication stream, i.e. to skip intermidiates using -i or to use -I
     pub fn stream_arg(&self) -> &'static str {
         if self.args.no_stream { "-i" } else { "-I" }
     }
@@ -175,7 +177,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
     fn get_resume_token(&self, fs: &Fs) -> io::Result<Option<String>> {
         // returning early without checking ErrorKind::NotFound is okay here
         // since there is a call to target_exists before
-        let token = self.get_zfs_value(fs, "receive_resume_token")?;
+        let token = self.get_zfs_value(fs, &["receive_resume_token"])?;
         if !["-", ""].contains(&token.as_str()) {
             return Ok(Some(token));
         }
@@ -223,10 +225,13 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
     }
 
     /// Returns ErrorKind::NotFound if dataset does not exist
-    fn get_zfs_value(&self, fs: &Fs, property: &str) -> io::Result<String> {
+    fn get_zfs_value(&self, fs: &Fs, property: &[&str]) -> io::Result<String> {
+        let property_nice = property.join(" ");
         let mut zfs = self.pick_zfs(fs.role).to_mut();
-        zfs.args(["get", "-H", property, &fs.fs]);
-        debug!("getting current value of {property} on {fs} using {zfs}...");
+        zfs.args(["get", "-H"]);
+        zfs.args(property);
+        zfs.arg(&fs.fs);
+        debug!("getting current value of {property_nice} on {fs} using {zfs}...");
         let output = zfs.capture()?;
         // Output err since we're not inheriting
         io::stderr().write_all(&output.stderr)?;
@@ -242,21 +247,21 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
         if !output.status.success() {
             // other error
-            error!("failed to get property {property} for {fs}");
+            error!("failed to get property {property_nice} for {fs}");
             exit(1);
         };
         let stdout = output.stdout;
         let stdout = str::from_utf8(&stdout)
             .map_err(|e| {
                 io::Error::other(format!(
-                    "could not parse output of zfs -H {property} {}: {e}",
+                    "could not parse output of zfs -H {property_nice} {}: {e}",
                     fs.fs
                 ))
             })?
             .trim();
         let value = stdout.split('\t').nth(2).ok_or_else(|| {
             io::Error::other(format!(
-                "expected zfs -H {property} {} to return at least three fields",
+                "expected zfs -H {property_nice} {} to return at least three fields",
                 fs.fs
             ))
         })?;
@@ -612,7 +617,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
     fn new_sync_snap(&self, fs: &Fs) -> io::Result<Option<String>> {
         let hostname = hostname()?;
-        let date = get_date();
+        let date = get_syncoid_date();
         let snap_name = format!(
             "chithi_{}{hostname}_{date}",
             self.args.identifier.as_deref().unwrap_or_default()
@@ -677,6 +682,24 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         newest_name_creation.map(|(newest, _newest_creation)| newest)
     }
 
+    fn get_matching_snapshot<'a>(
+        &self,
+        source_snaps: &'a HashMap<String, (String, String)>,
+        target_snaps: &HashMap<String, (String, String)>,
+    ) -> Option<&'a String> {
+        let mut source_snaps_sorted = source_snaps.iter().collect::<Vec<_>>();
+        source_snaps_sorted
+            .sort_by(|(_, (_, creation_x)), (_, (_, creation_y))| creation_x.cmp(creation_y));
+        for (source_snap, (guid, _)) in source_snaps_sorted {
+            if let Some((target_guid, _)) = target_snaps.get(source_snap)
+                && guid == target_guid
+            {
+                return Some(source_snap);
+            }
+        }
+        None
+    }
+
     // skip_sync_snapshot is set to true for these senarios
     // 1. fallback clone creation
     // 2. !bookmark && force-delete && delete successful (redo sync and skip snapshot creation beacuse it was already done)
@@ -684,7 +707,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
     /// Syncs a single dataset
     fn sync_dataset(&self, source: &Fs, target: &Fs, skip_sync_snapshot: bool) -> io::Result<()> {
         debug!("syncing source {} to target {}", source, target);
-        let sync = self.get_zfs_value(source, "syncoid:sync");
+        let sync = self.get_zfs_value(source, &["syncoid:sync"]);
         let sync = match sync {
             Ok(sync) => sync,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -749,24 +772,13 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             }
         }
 
+        // TODO change HashMap to Vec. Source snapshots are easier to deal with as a Vec sorted by creation.
         let mut source_snaps = self.get_snaps(source)?;
-        let target_snaps = if target_exists {
-            Some(self.get_snaps(target)?)
-        } else {
-            None
-        };
 
         if self.args.dump_snaps {
             for (snapshot, (guid, creation)) in source_snaps.iter() {
                 info!("got snapshot {snapshot} with guid:{guid} creation:{creation} for {source}")
             }
-            if let Some(target_snaps) = target_snaps.as_ref() {
-                for (snapshot, (guid, creation)) in target_snaps {
-                    info!(
-                        "got snapshot {snapshot} with guid:{guid} creation:{creation} for {target}"
-                    )
-                }
-            };
         }
 
         // TODO remove allow
@@ -803,28 +815,106 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             newest_snapshot
         };
 
+        let Some(oldest_snapshot) = self.oldest_sync_snap(&source_snaps) else {
+            // This should be dead code since getting newest_sync_snapshot
+            // should have errored, but keeping it here defensively
+            const NO_SNAP: &str =
+                "Could not fetch oldest snapsshot for {source} or it was filered out";
+            debug!("{}", NO_SNAP);
+            return Err(io::Error::other(NO_SNAP));
+        };
+
         // Finally do syncs
-        // If target does not exist, creat it with inital full sync
+        // If target does not exist, create it with inital full sync
         if !target_exists {
             if self.args.no_stream {
                 // TODO clone handling
                 debug!(
                     "target {target} does not exist, and --no-stream selected. Syncing newest snapshot for {source}"
                 );
-                // for no stream were done here
+                // for --no-stream were done here
                 return self.sync_full(source, target, newest_sync_snapshot);
-            } else {
-                // Do initial sync from oldest snapshot, then do -I to the newest
-                let Some(oldest_snapshot) = self.oldest_sync_snap(&source_snaps) else {
-                    // This should be dead code since getting newest_sync_snapshot should have errored
-                    const NO_SNAP: &str =
-                        "Could not fetch oldest snapsshot for {source} or it was filered out";
-                    debug!("{}", NO_SNAP);
-                    return Err(io::Error::other(NO_SNAP));
-                };
-                self.sync_full(source, target, oldest_snapshot.clone())?
             }
+            // Do initial sync from oldest snapshot, then do -I or -i to the newest
+            self.sync_full(source, target, oldest_snapshot.clone())?
         }
+
+        let (_target_snaps, _matching_snapshot) = {
+            let target_snaps = self.get_snaps(target)?;
+            if self.args.dump_snaps {
+                for (snapshot, (guid, creation)) in &target_snaps {
+                    info!(
+                        "got snapshot {snapshot} with guid:{guid} creation:{creation} for {target}"
+                    )
+                }
+            };
+            let matching_snap = self.get_matching_snapshot(&source_snaps, &target_snaps);
+            // TODO bookmark fallback to oldest snapshot
+            if let Some(matching_snap) = matching_snap {
+                (target_snaps, matching_snap)
+            } else {
+                // Size check target fs to see if it was accidentally created before sync
+                let target_size = self.get_zfs_value(target, &["-p", "used"])?;
+                let target_size = target_size.parse::<u64>().map_err(|e| {
+                    io::Error::other(format!("parsing target size failed with {e}"))
+                })?;
+                if target_size < (64 * 1024 * 1024) {
+                    error!(
+                        "NOTE: Target dataset {target} is < 64MB used - did you mistakenly run `zfs create {}` on the target?",
+                        target.fs
+                    );
+                    error!(
+                        "NOTE: ZFS initial replication must be to a NON EXISTANT DATASET, which will then be CREATED by the initial replication process."
+                    );
+                    if self.args.force_delete {
+                        error!(
+                            "NOTE: Not deleting target even though --force-delete was passed. Please delete {target} manually."
+                        );
+                    }
+                    return Err(io::Error::other(
+                        "no matching snapshots and target dataset is too small",
+                    ));
+                };
+                if self.args.force_delete && !target.fs.contains('/') {
+                    // force delete is not possible for root file systems
+                    error!(
+                        "NOTE: Target {target} is a root dataset. Force delete is not possibe for root datasets. Please delete {target} manually."
+                    );
+                    return Err(io::Error::other("not deleting root dataset"));
+                } else if self.args.force_delete {
+                    // destroy target fs and do initial sync from oldest snapshot, then do -I or -i to the newest
+                    let mut target_zfs = self.target_zfs.to_mut();
+                    target_zfs.args(["destroy", "-r", &target.fs]);
+                    let output = target_zfs.to_cmd().output()?;
+                    if !output.status.success() {
+                        return Err(io::Error::other(format!(
+                            "destroying target fs failed with\n{}\n{}",
+                            String::from_utf8_lossy(&output.stdout),
+                            String::from_utf8_lossy(&output.stderr)
+                        )));
+                    };
+                    self.sync_full(source, target, oldest_snapshot.clone())?;
+                    const FAKE_NEW_SYNC_GUID: &str = "0000000000000000000";
+                    const FAKE_NEW_SYNC_CREATION: &str = "0000000000000";
+                    let target_snaps = HashMap::from([(
+                        oldest_snapshot.clone(),
+                        (
+                            FAKE_NEW_SYNC_GUID.to_string(),
+                            FAKE_NEW_SYNC_CREATION.to_string(),
+                        ),
+                    )]);
+                    (target_snaps, oldest_snapshot)
+                } else {
+                    error!(
+                        "NOTE: Target dataset {target} exists but has no snapshots matching with {source}"
+                    );
+                    error!(
+                        "NOTE: Cowardly refusing to destroy existing target. You may pass the --force-delete flag to override this."
+                    );
+                    return Err(io::Error::other("no matching snapshots"));
+                }
+            }
+        };
 
         // TODO
         debug!("syncing datasets is not implemented yet");

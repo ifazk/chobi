@@ -44,7 +44,7 @@ pub fn hostname() -> io::Result<String> {
 }
 
 /// Gets the date and time with a timezone offset
-pub fn get_date() -> String {
+pub fn get_syncoid_date() -> String {
     let local = chrono::Local::now();
     let year = local.year();
     let mon = local.month();

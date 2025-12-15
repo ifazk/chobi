@@ -104,6 +104,10 @@ pub struct Args {
     #[arg(long)]
     pub target_host: Option<String>,
 
+    /// Remove target datasets recursively if there are no matching snapshots/bookmarks (also overwrites conflicting named snapshots)
+    #[arg(long)]
+    pub force_delete: bool,
+
     pub source: String,
 
     pub target: String,
