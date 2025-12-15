@@ -21,6 +21,7 @@ use chobi::chithi::{Args, Cmd, CmdTarget, Fs, Pipeline, Role, get_is_roots, sys}
 use clap::Parser;
 use log::{debug, error, info, trace, warn};
 use regex_lite::Regex;
+use std::cell::LazyCell;
 use std::{
     collections::{HashMap, HashSet},
     io::{self, BufRead, BufReader, Write},
@@ -28,10 +29,19 @@ use std::{
 };
 
 const DOES_NOT_EXIST: &str = "dataset does not exist";
+const RESUME_ERROR_1: &str = "used in the initial send no longer exists";
+thread_local! {
+static RESUME_ERROR_2: LazyCell<Regex> = LazyCell::new(|| {
+    Regex::new(r"incremental source [0-9xa-f]+ no longer exists")
+        .expect("regex pattern should be correct")
+});
+}
 
 struct CmdConfig<'args, 'target> {
     source_cmd_target: &'args CmdTarget<'args>,
+    source_is_root: bool,
     target_cmd_target: &'args CmdTarget<'args>,
+    target_is_root: bool,
     source_zfs: Cmd<'args, &'target [&'args str]>,
     target_ps: Cmd<'args, &'target [&'args str]>,
     target_zfs: Cmd<'args, &'target [&'args str]>,
@@ -75,7 +85,9 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
         Ok(Self {
             source_cmd_target,
+            source_is_root,
             target_cmd_target,
+            target_is_root,
             source_zfs,
             target_ps,
             target_zfs,
@@ -376,13 +388,13 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             let mut args = Vec::from(["send"]);
             args.extend(send_options);
             args.push(&send_source);
-            Cmd::new(&CmdTarget::Local, false, "zfs", args)
+            Cmd::new(&CmdTarget::Local, !self.source_is_root, "zfs", args)
         };
         let recv_cmd = {
             let mut args = Vec::from(["receive"]);
             args.extend(recv_options);
             args.push(&target.fs);
-            Cmd::new(&CmdTarget::Local, false, "zfs", args)
+            Cmd::new(&CmdTarget::Local, !self.target_is_root, "zfs", args)
         };
         let pipelines = self.build_sync_pipelines(send_cmd, recv_cmd, pv_size);
         if self.is_zfs_busy(target)? {
@@ -441,6 +453,44 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
     fn sync_resume(&self, source: &Fs, target: &Fs, recv_token: String) -> io::Result<()> {
         let send_source = format!("-t {recv_token}");
         let pv_size = self.get_send_size(&send_source, None)?;
+        info!(
+            "Resuming interrupted zfs send/recv from {source} to {target} (~ {})",
+            ReadableBytes::from(pv_size)
+        );
+        self.run_sync_cmd(source, send_source, target, pv_size)
+    }
+
+    fn reset_recv_state(&self, target: &Fs) {
+        let mut target_zfs = self.target_zfs.to_mut();
+        target_zfs.args(["receive", "-A", &target.fs]);
+        debug!("reset partial recv state of {target} using {target_zfs}...");
+        match target_zfs.to_cmd().stderr(Stdio::inherit()).status() {
+            Ok(exit) if exit.success() => {}
+            Ok(fail) => {
+                error!("resetting partial recv state failed with: {fail}");
+                exit(0);
+            }
+            Err(e) => {
+                error!("resetting partial recv state failed with: {e}");
+                exit(0);
+            }
+        };
+    }
+
+    fn sync_full(&self, source: &Fs, target: &Fs, snapshot: String) -> io::Result<()> {
+        let send_source = format!("{}@{snapshot}", source.fs);
+        let pv_size = self.get_send_size(&send_source, None)?;
+        if self.args.no_stream {
+            info!(
+                "--no-stream selected; sending newest full snapshot {send_source} to new target filesystem {target} (~ {})",
+                ReadableBytes::from(pv_size)
+            );
+        } else {
+            info!(
+                "Sending oldest full snapshot {send_source} to new target filesystem {target} (~ {})",
+                ReadableBytes::from(pv_size)
+            );
+        }
         self.run_sync_cmd(source, send_source, target, pv_size)
     }
 
@@ -523,11 +573,15 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         let mut snapshots = HashMap::new();
         for (snapshot, pair) in pre_snapshots {
             let Some(guid_creation) = pair.0.zip(pair.1) else {
+                // This should not happen if zfs on the source behaves correctly
                 return Err(io::Error::other(format!(
                     "didn't get both guid and creation for {snapshot}"
                 )));
             };
-            snapshots.insert(snapshot, guid_creation);
+            // We do this check here so that we don't need to keep checking
+            if self.snap_is_included(&snapshot) {
+                snapshots.insert(snapshot, guid_creation);
+            }
         }
 
         Ok(snapshots)
@@ -583,24 +637,44 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         Ok(Some(snap_name))
     }
 
+    fn oldest_sync_snap<'a>(
+        &self,
+        source_snaps: &'a HashMap<String, (String, String)>,
+    ) -> Option<&'a String> {
+        let mut oldest_name_creation = None;
+        for (snap_name, (_, creation)) in source_snaps {
+            if oldest_name_creation.is_none() {
+                oldest_name_creation = Some((snap_name, creation));
+                continue;
+            }
+            let (oldest_snap_name, oldest_creation) =
+                oldest_name_creation.as_mut().expect("checked is_none");
+            if oldest_creation.as_str() > creation {
+                *oldest_snap_name = snap_name;
+                *oldest_creation = creation;
+            }
+        }
+        oldest_name_creation.map(|(oldest, _oldest_creation)| oldest)
+    }
+
     fn newest_sync_snap<'a>(
         &self,
         source_snaps: &'a HashMap<String, (String, String)>,
     ) -> Option<&'a String> {
-        let mut snap_name_creation = None;
+        let mut newest_name_creation = None;
         for (snap_name, (_, creation)) in source_snaps {
-            if snap_name_creation.is_none() {
-                snap_name_creation = Some((snap_name, creation));
+            if newest_name_creation.is_none() {
+                newest_name_creation = Some((snap_name, creation));
                 continue;
             }
-            let (seen_snap_name, seen_creation) =
-                snap_name_creation.as_mut().expect("checked is_none");
-            if seen_creation.as_str() < creation {
-                *seen_snap_name = snap_name;
-                *seen_creation = creation;
+            let (newest_snap_name, newest_creation) =
+                newest_name_creation.as_mut().expect("checked is_none");
+            if newest_creation.as_str() < creation {
+                *newest_snap_name = snap_name;
+                *newest_creation = creation;
             }
         }
-        snap_name_creation.map(|(snap_name, _creation)| snap_name)
+        newest_name_creation.map(|(newest, _newest_creation)| newest)
     }
 
     // skip_sync_snapshot is set to true for these senarios
@@ -656,12 +730,26 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             None
         };
 
-        // we handle the resume first
+        // we handle any resumes first
         if let Some(recv_token) = recv_token {
-            self.sync_resume(source, target, recv_token)?
+            let resume_res = self.sync_resume(source, target, recv_token);
+            if let Err(resume_err) = &resume_res
+                && resume_err.kind() == io::ErrorKind::Other
+                && let err_str = resume_err.to_string()
+                && (err_str.contains(RESUME_ERROR_1)
+                    || RESUME_ERROR_2.with(|regex| regex.is_match(&err_str)))
+            {
+                // reset and continue normal resume
+                warn!(
+                    "resetting partially receive state because the snapshot source no longer exists"
+                );
+                self.reset_recv_state(target);
+            } else {
+                resume_res?;
+            }
         }
 
-        let source_snaps = self.get_snaps(source)?;
+        let mut source_snaps = self.get_snaps(source)?;
         let target_snaps = if target_exists {
             Some(self.get_snaps(target)?)
         } else {
@@ -685,14 +773,58 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         #[allow(unused_variables)]
         let newest_sync_snapshot = if !self.args.no_sync_snap && !skip_sync_snapshot {
             let new_sync_snap = self.new_sync_snap(source)?;
-            if new_sync_snap.is_none() {
-                self.newest_sync_snap(&source_snaps).cloned()
+            if let Some(new_snap_name) = new_sync_snap {
+                // before returning, update source snaps
+                const FAKE_NEW_SYNC_GUID: &str = "9999999999999999999";
+                const FAKE_NEW_SYNC_CREATION: &str = "9999999999000";
+                source_snaps.insert(
+                    new_snap_name.clone(),
+                    (
+                        FAKE_NEW_SYNC_GUID.to_string(),
+                        FAKE_NEW_SYNC_CREATION.to_string(),
+                    ),
+                );
+                new_snap_name
             } else {
-                new_sync_snap
+                let Some(newest_snapshot) = self.newest_sync_snap(&source_snaps).cloned() else {
+                    const NO_SNAP: &str = "New sync snapshot was not created or was filered out, and there were no snapshots on source";
+                    error!("{}", NO_SNAP);
+                    return Err(io::Error::other(NO_SNAP));
+                };
+                newest_snapshot
             }
         } else {
-            self.newest_sync_snap(&source_snaps).cloned()
+            let Some(newest_snapshot) = self.newest_sync_snap(&source_snaps).cloned() else {
+                error!("No snapshots exist on source {source} and you asked for --no-sync-snap");
+                return Err(io::Error::other(
+                    "No snapshots exist on source and you asked for --no-sync-snap",
+                ));
+            };
+            newest_snapshot
         };
+
+        // Finally do syncs
+        // If target does not exist, creat it with inital full sync
+        if !target_exists {
+            if self.args.no_stream {
+                // TODO clone handling
+                debug!(
+                    "target {target} does not exist, and --no-stream selected. Syncing newest snapshot for {source}"
+                );
+                // for no stream were done here
+                return self.sync_full(source, target, newest_sync_snapshot);
+            } else {
+                // Do initial sync from oldest snapshot, then do -I to the newest
+                let Some(oldest_snapshot) = self.oldest_sync_snap(&source_snaps) else {
+                    // This should be dead code since getting newest_sync_snapshot should have errored
+                    const NO_SNAP: &str =
+                        "Could not fetch oldest snapsshot for {source} or it was filered out";
+                    debug!("{}", NO_SNAP);
+                    return Err(io::Error::other(NO_SNAP));
+                };
+                self.sync_full(source, target, oldest_snapshot.clone())?
+            }
+        }
 
         // TODO
         debug!("syncing datasets is not implemented yet");
@@ -716,6 +848,8 @@ fn main() -> io::Result<()> {
     let target = Fs::new(args.target_host.as_deref(), &args.target, Role::Target);
     let (source_is_root, target_is_root) =
         get_is_roots(source.host, target.host, args.no_privilege_elevation);
+
+    debug!("source_is_root:{source_is_root}, target_is_root:{target_is_root}");
 
     trace!("built fs");
 

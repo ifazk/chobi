@@ -31,6 +31,12 @@ been a better option, which I also have some experience with. But I just happen
 to be mainly using Rust right now, and so things will be quicker to implement on
 my end.
 
+# Rust note
+It is an explicit goal to be single threaded, and use non-blocking code without
+busy spinning. There should not be any thread spawning code anywhere here. It is
+also an explicit goal to only rely on posix instead of needing separate special
+case code for Linux and FreeBSD.
+
 # ETA when?
 Perhaps never. If I get to understand all the features of sanoid and syncoid
 through this project, that's more than enough for me.
