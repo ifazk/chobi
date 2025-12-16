@@ -98,12 +98,6 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         })
     }
 
-    // TODO: this is kinda fragile
-    /// Chooses the type of replication stream, i.e. to skip intermidiates using -i or to use -I
-    pub fn stream_arg(&self) -> &'static str {
-        if self.args.no_stream { "-i" } else { "-I" }
-    }
-
     pub fn check_ssh_if_needed(
         source_cmd_target: &CmdTarget,
         target_cmd_target: &CmdTarget,
@@ -269,8 +263,12 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
     }
 
     /// Will fail for dry-run sync-snaps, so special case that instead of using this
-    fn get_send_size(&self, source: &str, other: Option<&str>) -> io::Result<u64> {
-        let is_recv_token = source.starts_with("-t ");
+    fn get_send_size(
+        &self,
+        send_from: (Option<&str>, &str),
+        send_to: Option<&str>,
+    ) -> io::Result<u64> {
+        let is_recv_token = send_from.0.is_some_and(|flag| flag == "-t");
         let send_options = if is_recv_token {
             self.args.send_options.filter_allowed(&['V', 'e'])
         } else {
@@ -279,23 +277,24 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 .filter_allowed(&['L', 'V', 'R', 'X', 'b', 'c', 'e', 'h', 'p', 's', 'w'])
         };
 
-        let from_to = if let Some(other) = other {
-            vec![self.stream_arg(), source, other]
-        } else if let Some(source) = source.strip_prefix("-t ") {
-            vec!["-t", source]
-        } else {
-            vec![source]
-        };
+        let mut from_to = Vec::new();
+        if let Some(flag) = send_from.0 {
+            from_to.push(flag);
+        }
+        from_to.push(send_from.1);
+        if let Some(other) = send_to {
+            from_to.push(other);
+        }
 
         let mut source_zfs = self.source_zfs.to_mut();
         source_zfs.arg("send");
         source_zfs.args(send_options);
         source_zfs.arg("-nvP");
-        source_zfs.args(from_to);
+        source_zfs.args(&from_to);
         debug!("getting estimated transfer size from source using {source_zfs}...");
         let output = source_zfs.capture_stdout()?;
         if !output.status.success() {
-            error!("failed to get estimated size for {source}");
+            error!("failed to get estimated size for {}", from_to.join(" "));
             exit(1);
         };
         let output = String::from_utf8_lossy(&output.stdout);
@@ -351,16 +350,17 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
     fn run_sync_cmd(
         &self,
         _source: &Fs,
-        send_source: String,
+        send_from: (Option<&str>, &str),
+        send_to: Option<&str>,
         target: &Fs,
         pv_size: u64,
     ) -> io::Result<()> {
         let _disp_pv_size = ReadableBytes::from(pv_size);
-        let send_options = if send_source.starts_with("-t ") {
+        let send_options = if send_from.0 == Some("-t") {
             self.args
                 .send_options
                 .filter_allowed(&['P', 'V', 'e', 'v'][..])
-        } else if send_source.contains('#') {
+        } else if send_from.1.contains('#') {
             self.args
                 .send_options
                 .filter_allowed(&['L', 'V', 'c', 'e', 'w'][..])
@@ -392,7 +392,13 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         let send_cmd = {
             let mut args = Vec::from(["send"]);
             args.extend(send_options);
-            args.push(&send_source);
+            if let Some(flag) = send_from.0 {
+                args.push(flag);
+            }
+            args.push(send_from.1);
+            if let Some(send_to) = send_to {
+                args.push(send_to);
+            }
             Cmd::new(&CmdTarget::Local, !self.source_is_root, "zfs", args)
         };
         let recv_cmd = {
@@ -455,14 +461,14 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         Ok(())
     }
 
-    fn sync_resume(&self, source: &Fs, target: &Fs, recv_token: String) -> io::Result<()> {
-        let send_source = format!("-t {recv_token}");
-        let pv_size = self.get_send_size(&send_source, None)?;
+    fn sync_resume(&self, source: &Fs, target: &Fs, recv_token: &str) -> io::Result<()> {
+        let send_from = (Some("-t"), recv_token);
+        let pv_size = self.get_send_size(send_from, None)?;
         info!(
             "Resuming interrupted zfs send/recv from {source} to {target} (~ {})",
             ReadableBytes::from(pv_size)
         );
-        self.run_sync_cmd(source, send_source, target, pv_size)
+        self.run_sync_cmd(source, send_from, None, target, pv_size)
     }
 
     fn reset_recv_state(&self, target: &Fs) {
@@ -483,23 +489,85 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
     }
 
     fn sync_full(&self, source: &Fs, target: &Fs, snapshot: String) -> io::Result<()> {
-        let send_source = format!("{}@{snapshot}", source.fs);
-        let pv_size = self.get_send_size(&send_source, None)?;
+        let send_from = format!("{}@{snapshot}", source.fs);
+        let pv_size = self.get_send_size((None, &send_from), None)?;
         if self.args.no_stream {
             info!(
-                "--no-stream selected; sending newest full snapshot {send_source} to new target filesystem {target} (~ {})",
+                "--no-stream selected; sending newest full snapshot {send_from} to new target filesystem {target} (~ {})",
                 ReadableBytes::from(pv_size)
             );
         } else {
             info!(
-                "Sending oldest full snapshot {send_source} to new target filesystem {target} (~ {})",
+                "Sending oldest full snapshot {send_from} to new target filesystem {target} (~ {})",
                 ReadableBytes::from(pv_size)
             );
         }
-        self.run_sync_cmd(source, send_source, target, pv_size)
+        self.run_sync_cmd(source, (None, &send_from), None, target, pv_size)
     }
 
-    fn get_snaps(&self, fs: &Fs) -> io::Result<HashMap<String, (String, String)>> {
+    fn sync_intermidiate(
+        &self,
+        source: &Fs,
+        target: &Fs,
+        from_snapshot: &str,
+        to_snapshot: &str,
+    ) -> io::Result<()> {
+        let send_from = (Some("-i"), from_snapshot);
+        let send_to = format!("{}@{to_snapshot}", source.fs);
+        let send_to = Some(send_to.as_str());
+        let pv_size = self.get_send_size(send_from, send_to)?;
+        info!(
+            "Sending incremental intermediate snapshot {from_snapshot} .. {}@{to_snapshot} to new target filesystem {target} (~ {})",
+            source.fs,
+            ReadableBytes::from(pv_size)
+        );
+        self.run_sync_cmd(source, send_from, send_to, target, pv_size)
+    }
+
+    fn sync_incremental(
+        &self,
+        source: &Fs,
+        target: &Fs,
+        from_snapshot: &str,
+        to_snapshot: &str,
+    ) -> io::Result<()> {
+        let send_from = (Some("-I"), from_snapshot);
+        let send_to = format!("{}@{to_snapshot}", source.fs);
+        let send_to = Some(send_to.as_str());
+        let pv_size = self.get_send_size(send_from, send_to)?;
+        info!(
+            "Sending full incremental snapshot {from_snapshot} .. {}@{to_snapshot} to new target filesystem {target} (~ {})",
+            source.fs,
+            ReadableBytes::from(pv_size)
+        );
+        self.run_sync_cmd(source, send_from, send_to, target, pv_size)
+    }
+
+    // This is called in the stream case
+    fn sync_incremental_or_fallback(
+        &self,
+        source: &Fs,
+        target: &Fs,
+        snapshots: &[(String, (String, String))],
+    ) -> io::Result<()> {
+        if !self.args.include_snaps.is_empty() || !self.args.exclude_snaps.is_empty() {
+            info!(
+                "--no-stream is omitted but snaps are filtered. Simulating -I with filtered snaps"
+            );
+            for snapshots in snapshots.windows(2) {
+                let from_snapshot = &snapshots[0].0;
+                let to_snapshot = &snapshots.last().expect("windows length 2").0;
+                self.sync_intermidiate(source, target, from_snapshot, to_snapshot)?
+            }
+            Ok(())
+        } else {
+            let from_snapshot = &snapshots[0].0;
+            let to_snapshot = &snapshots.last().expect("length checked > 1").0;
+            self.sync_incremental(source, target, from_snapshot, to_snapshot)
+        }
+    }
+
+    fn get_snaps(&self, fs: &Fs) -> io::Result<Vec<(String, (String, String))>> {
         let mut zfs = self.pick_zfs(fs.role).to_mut();
         zfs.args([
             "get",
@@ -538,7 +606,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             let Some(snapshot) = fs_at_snapshot
                 .strip_prefix(fs.fs.as_ref())
                 .and_then(|at_snapshot| at_snapshot.strip_prefix('@'))
-                .map(|snapshot| snapshot.to_string())
+                .map(|snapshot: &str| snapshot.to_string())
             else {
                 // skip anything that is not the specified fs
                 warn!(
@@ -575,7 +643,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             };
         }
 
-        let mut snapshots = HashMap::new();
+        let mut snapshots = Vec::new();
         for (snapshot, pair) in pre_snapshots {
             let Some(guid_creation) = pair.0.zip(pair.1) else {
                 // This should not happen if zfs on the source behaves correctly
@@ -585,9 +653,19 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             };
             // We do this check here so that we don't need to keep checking
             if self.snap_is_included(&snapshot) {
-                snapshots.insert(snapshot, guid_creation);
+                snapshots.push((snapshot, guid_creation));
             }
         }
+
+        snapshots.sort_by(
+            |(snapshot_x, (_, creation_x)), (snapshot_y, (_, creation_y))| {
+                if creation_x.eq(creation_y) {
+                    snapshot_x.cmp(snapshot_y)
+                } else {
+                    creation_x.cmp(creation_y)
+                }
+            },
+        );
 
         Ok(snapshots)
     }
@@ -644,57 +722,41 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
     fn oldest_sync_snap<'a>(
         &self,
-        source_snaps: &'a HashMap<String, (String, String)>,
-    ) -> Option<&'a String> {
-        let mut oldest_name_creation = None;
-        for (snap_name, (_, creation)) in source_snaps {
-            if oldest_name_creation.is_none() {
-                oldest_name_creation = Some((snap_name, creation));
-                continue;
-            }
-            let (oldest_snap_name, oldest_creation) =
-                oldest_name_creation.as_mut().expect("checked is_none");
-            if oldest_creation.as_str() > creation {
-                *oldest_snap_name = snap_name;
-                *oldest_creation = creation;
-            }
+        source_snaps: &'a [(String, (String, String))],
+    ) -> Option<(&'a String, &'a String, &'a String)> {
+        let len = source_snaps.len();
+        if len > 0 {
+            source_snaps
+                .first()
+                .map(|(snapshot, (guid, creation))| (snapshot, guid, creation))
+        } else {
+            None
         }
-        oldest_name_creation.map(|(oldest, _oldest_creation)| oldest)
     }
 
     fn newest_sync_snap<'a>(
         &self,
-        source_snaps: &'a HashMap<String, (String, String)>,
+        source_snaps: &'a [(String, (String, String))],
     ) -> Option<&'a String> {
-        let mut newest_name_creation = None;
-        for (snap_name, (_, creation)) in source_snaps {
-            if newest_name_creation.is_none() {
-                newest_name_creation = Some((snap_name, creation));
-                continue;
-            }
-            let (newest_snap_name, newest_creation) =
-                newest_name_creation.as_mut().expect("checked is_none");
-            if newest_creation.as_str() < creation {
-                *newest_snap_name = snap_name;
-                *newest_creation = creation;
-            }
+        let len = source_snaps.len();
+        if len > 0 {
+            source_snaps.get(len - 1).map(|(snapshot, _)| snapshot)
+        } else {
+            None
         }
-        newest_name_creation.map(|(newest, _newest_creation)| newest)
     }
 
+    // The output is guaranteed to be non-empty if is_some
     fn get_matching_snapshot<'a>(
         &self,
-        source_snaps: &'a HashMap<String, (String, String)>,
+        sorted_source_snaps: &'a [(String, (String, String))],
         target_snaps: &HashMap<String, (String, String)>,
-    ) -> Option<&'a String> {
-        let mut source_snaps_sorted = source_snaps.iter().collect::<Vec<_>>();
-        source_snaps_sorted
-            .sort_by(|(_, (_, creation_x)), (_, (_, creation_y))| creation_x.cmp(creation_y));
-        for (source_snap, (guid, _)) in source_snaps_sorted {
+    ) -> Option<&'a [(String, (String, String))]> {
+        for (idx, (source_snap, (guid, _))) in sorted_source_snaps.iter().enumerate().rev() {
             if let Some((target_guid, _)) = target_snaps.get(source_snap)
                 && guid == target_guid
             {
-                return Some(source_snap);
+                return Some(&sorted_source_snaps[idx..]);
             }
         }
         None
@@ -755,7 +817,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
         // we handle any resumes first
         if let Some(recv_token) = recv_token {
-            let resume_res = self.sync_resume(source, target, recv_token);
+            let resume_res = self.sync_resume(source, target, &recv_token);
             if let Err(resume_err) = &resume_res
                 && resume_err.kind() == io::ErrorKind::Other
                 && let err_str = resume_err.to_string()
@@ -772,7 +834,6 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             }
         }
 
-        // TODO change HashMap to Vec. Source snapshots are easier to deal with as a Vec sorted by creation.
         let mut source_snaps = self.get_snaps(source)?;
 
         if self.args.dump_snaps {
@@ -781,21 +842,19 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             }
         }
 
-        // TODO remove allow
-        #[allow(unused_variables)]
         let newest_sync_snapshot = if !self.args.no_sync_snap && !skip_sync_snapshot {
             let new_sync_snap = self.new_sync_snap(source)?;
             if let Some(new_snap_name) = new_sync_snap {
                 // before returning, update source snaps
                 const FAKE_NEW_SYNC_GUID: &str = "9999999999999999999";
                 const FAKE_NEW_SYNC_CREATION: &str = "9999999999000";
-                source_snaps.insert(
+                source_snaps.push((
                     new_snap_name.clone(),
                     (
                         FAKE_NEW_SYNC_GUID.to_string(),
                         FAKE_NEW_SYNC_CREATION.to_string(),
                     ),
-                );
+                ));
                 new_snap_name
             } else {
                 let Some(newest_snapshot) = self.newest_sync_snap(&source_snaps).cloned() else {
@@ -815,7 +874,9 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             newest_snapshot
         };
 
-        let Some(oldest_snapshot) = self.oldest_sync_snap(&source_snaps) else {
+        let Some((oldest_snapshot, oldest_guid, oldest_creation)) =
+            self.oldest_sync_snap(&source_snaps)
+        else {
             // This should be dead code since getting newest_sync_snapshot
             // should have errored, but keeping it here defensively
             const NO_SNAP: &str =
@@ -823,6 +884,10 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             debug!("{}", NO_SNAP);
             return Err(io::Error::other(NO_SNAP));
         };
+        let oldest_all = (
+            oldest_snapshot.to_string(),
+            (oldest_guid.clone(), oldest_creation.clone()),
+        );
 
         // Finally do syncs
         // If target does not exist, create it with inital full sync
@@ -839,8 +904,11 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             self.sync_full(source, target, oldest_snapshot.clone())?
         }
 
-        let (_target_snaps, _matching_snapshot) = {
-            let target_snaps = self.get_snaps(target)?;
+        let (_target_snaps, matching_snapshot_and_later) = {
+            let target_snaps = self
+                .get_snaps(target)?
+                .into_iter()
+                .collect::<HashMap<_, _>>();
             if self.args.dump_snaps {
                 for (snapshot, (guid, creation)) in &target_snaps {
                     info!(
@@ -893,17 +961,24 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                             String::from_utf8_lossy(&output.stderr)
                         )));
                     };
-                    self.sync_full(source, target, oldest_snapshot.clone())?;
-                    const FAKE_NEW_SYNC_GUID: &str = "0000000000000000000";
-                    const FAKE_NEW_SYNC_CREATION: &str = "0000000000000";
-                    let target_snaps = HashMap::from([(
-                        oldest_snapshot.clone(),
-                        (
-                            FAKE_NEW_SYNC_GUID.to_string(),
-                            FAKE_NEW_SYNC_CREATION.to_string(),
-                        ),
-                    )]);
-                    (target_snaps, oldest_snapshot)
+                    if self.args.no_stream {
+                        // for --no-stream were done here
+                        return self.sync_full(source, target, newest_sync_snapshot);
+                    } else {
+                        self.sync_full(source, target, oldest_snapshot.clone())?;
+                        let target_snaps = HashMap::from([oldest_all]);
+                        let Some(matching_snapshots) =
+                            self.get_matching_snapshot(&source_snaps, &target_snaps)
+                        else {
+                            error!(
+                                "internal error, target snapshots list created from oldest snapshot, but getting matching list failed"
+                            );
+                            return Err(io::Error::other(
+                                "building matching snapshots from oldest failed",
+                            ));
+                        };
+                        (target_snaps, matching_snapshots)
+                    }
                 } else {
                     error!(
                         "NOTE: Target dataset {target} exists but has no snapshots matching with {source}"
@@ -916,10 +991,35 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             }
         };
 
-        // TODO
-        debug!("syncing datasets is not implemented yet");
+        if matching_snapshot_and_later.is_empty() {
+            error!(
+                "internal error, matching snapshots list created from oldest snapshot, but has length 0"
+            );
+            return Err(io::Error::other(
+                "matching snapshots list created from oldest snapshot, but has length 0",
+            ));
+        }
 
-        Ok(())
+        if matching_snapshot_and_later.len() == 1 {
+            info!("the latest snapshot is already in target");
+            return Ok(());
+        }
+
+        // If we got this far, target exists now and has matching snapshot of length > 1
+        if self.args.no_stream {
+            // for --no-stream we do a single -i stream to newest and finish
+            self.sync_intermidiate(
+                source,
+                target,
+                &matching_snapshot_and_later[0].0,
+                &matching_snapshot_and_later
+                    .last()
+                    .expect("length checked > 1")
+                    .0,
+            )
+        } else {
+            self.sync_incremental_or_fallback(source, target, matching_snapshot_and_later)
+        }
     }
 }
 
