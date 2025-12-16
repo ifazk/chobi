@@ -221,6 +221,7 @@ pub fn try_terminate_if_running(child: &mut process::Child) -> io::Result<()> {
 /// Run command and both prints and captures outputs
 pub fn pipe_and_capture_stderr(
     main: &mut process::Command,
+    pv: Option<&mut process::Command>,
     other: &mut process::Command,
 ) -> io::Result<(process::Output, process::Output)> {
     use process::Stdio;
@@ -232,16 +233,47 @@ pub fn pipe_and_capture_stderr(
 
     let mut main_child = main.spawn()?;
 
+    let pv = match pv {
+        Some(pv) => {
+            let pv = pv
+                .stdin(Stdio::from(
+                    main_child.stdout.take().expect("stdout is piped"),
+                ))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+            Some(pv)
+        }
+        None => None,
+    };
+    let mut pv_child = match pv {
+        Some(pv) => match pv.spawn() {
+            Ok(child) => Some(child),
+            Err(e) => {
+                let _ = try_terminate_if_running(&mut main_child);
+                main_child.wait()?;
+                return Err(e);
+            }
+        },
+        None => None,
+    };
+
+    let other_stdin = pv_child
+        .as_mut()
+        .map(|pv_child| pv_child.stdout.take().expect("stdout is piped"))
+        .unwrap_or_else(|| main_child.stdout.take().expect("stdout is piped"));
+
     let other = other
-        .stdin(Stdio::from(
-            main_child.stdout.take().expect("stdout is piped"),
-        ))
+        .stdin(Stdio::from(other_stdin))
         .stdout(Stdio::inherit())
         .stderr(Stdio::piped());
 
     let mut other_child = match other.spawn() {
         Ok(child) => child,
         Err(e) => {
+            if let Some(mut pv_child) = pv_child {
+                let _ = try_terminate_if_running(&mut pv_child);
+                pv_child.wait()?;
+            };
             let _ = try_terminate_if_running(&mut main_child);
             main_child.wait()?;
             return Err(e);
@@ -249,7 +281,7 @@ pub fn pipe_and_capture_stderr(
     };
 
     // Handles that implement Drop
-    let main_err = main_child.stderr.take().expect("child stdout is piped");
+    let main_err = main_child.stderr.take().expect("child stderr is piped");
     let other_err = other_child.stderr.take().expect("child stderr is piped");
 
     let mut children = vec![main_child, other_child];
@@ -261,6 +293,14 @@ pub fn pipe_and_capture_stderr(
         4096,
         io::stderr(),
     )?;
+
+    let pv_status = pv_child.as_mut().map(|pv_child| pv_child.wait());
+    if let Some(pv_status) = pv_status {
+        let pv_status = pv_status?;
+        if !pv_status.success() {
+            return Err(io::Error::other(format!("pv errored with {pv_status}")));
+        }
+    };
 
     let other = outputs.pop().expect("lengths should match");
     let other = process::Output {

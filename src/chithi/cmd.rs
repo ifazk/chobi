@@ -168,7 +168,12 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Cmd<'args, T> {
     pub fn check_exists(&self) -> io::Result<()> {
         let exists = self.to_check().output()?.status.success();
         if !exists {
-            error!("{} does not exist in local system", self.base);
+            let local = if self.target.is_remote() {
+                ""
+            } else {
+                "local system"
+            };
+            error!("{} does not exist in {}{local}", self.base, self.target);
             exit(1);
         }
         Ok(())

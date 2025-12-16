@@ -45,7 +45,7 @@ struct CmdConfig<'args, 'target> {
     source_zfs: Cmd<'args, &'target [&'args str]>,
     target_ps: Cmd<'args, &'target [&'args str]>,
     target_zfs: Cmd<'args, &'target [&'args str]>,
-    _optional_cmds: HashMap<&'static str, Cmd<'args, &'target [&'args str]>>,
+    optional_cmds: HashMap<&'static str, Cmd<'args, Vec<&'args str>>>,
     _optional_features: HashSet<&'static str>,
     args: &'args Args,
     zfs_recv: Regex,
@@ -57,6 +57,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         source_is_root: bool,
         target_cmd_target: &'args CmdTarget<'args>,
         target_is_root: bool,
+        local_cmd_target: &'args CmdTarget<'args>,
         args: &'args Args,
     ) -> io::Result<Self> {
         let source_zfs = Cmd::new(source_cmd_target, !source_is_root, "zfs", &[][..]);
@@ -69,7 +70,18 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             // sh is a posix standard, so we don't need to check
         }
         // TODO
-        let optional_cmds = HashMap::new();
+        let mut optional_cmds = HashMap::new();
+        let local_pv = Cmd::new(
+            local_cmd_target,
+            false,
+            "pv",
+            args.pv_options.split_whitespace().collect::<Vec<_>>(),
+        );
+        if !args.no_command_checks || local_pv.to_check().output()?.status.success() {
+            optional_cmds.insert("localpv", local_pv);
+        } else {
+            warn!("pv not available on local machine - sync will continue without progress bar");
+        }
         // TODO
         let optional_features = HashSet::new();
         // precompile zfs_recv regex
@@ -92,7 +104,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             target_ps,
             target_zfs,
             _optional_features: optional_features,
-            _optional_cmds: optional_cmds,
+            optional_cmds,
             args,
             zfs_recv,
         })
@@ -457,8 +469,14 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 let mut source_cmd = source_pipeline.to_cmd();
                 debug!("target pipeline: {target_pipeline}");
                 let mut target_cmd = target_pipeline.to_cmd();
+                let mut pv_cmd = self.optional_cmds.get("localpv").map(|pv| {
+                    let mut pv = pv.to_cmd();
+                    pv.arg("-s");
+                    pv.arg(pv_size.to_string());
+                    pv
+                });
                 let (source_output, target_output) =
-                    pipe_and_capture_stderr(&mut source_cmd, &mut target_cmd)?;
+                    pipe_and_capture_stderr(&mut source_cmd, pv_cmd.as_mut(), &mut target_cmd)?;
                 if !source_output.status.success() || !target_output.status.success() {
                     // We've already output the errors, but let's distinguish
                     // between source and target errors here
@@ -1080,6 +1098,7 @@ fn main() -> io::Result<()> {
         source_is_root,
         &target_cmd_target,
         target_is_root,
+        &local_cmd_target,
         &args,
     )?;
 
