@@ -198,13 +198,29 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             exit(1);
         }
         let mut children = Vec::new();
-        for line in output.stdout.lines() {
+        let mut parent_processed = false;
+        'outer: for line in output.stdout.lines() {
             let line = line?;
             let Some((name, origin)) = line.split_once("\t") else {
                 return Err(io::Error::other(format!(
                     "expected tab separated name and origin, got {line}"
                 )));
             };
+            if !parent_processed {
+                parent_processed = true;
+                if self.args.skip_parent {
+                    debug!("skipping parent dataset {name}");
+                    continue;
+                }
+            }
+            if !self.args.exclude_datasets.is_empty() {
+                for r in &self.args.exclude_datasets {
+                    if r.is_match(name) {
+                        debug!("excluding dataset {name} because of --exclude-datasets={r}");
+                        continue 'outer;
+                    }
+                }
+            }
             let child = fs.new_child(name.to_string(), origin.to_string());
             children.push(child);
         }

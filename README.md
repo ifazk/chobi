@@ -14,15 +14,12 @@ some more escaping might be needed.
 1. Chithi: I've decided not to handle clones when replicating datasets. Part of
 the reason is, I don't use clones myself. I haven't closed the door on clones,
 but for now we assume `--no-clone-handling`.
-2. Chithi: I've decided not to handle `--exclude-datasets` for now.
-3. Chithi: I've decided not to handle `--no-rollback` for now, so syncs will
-always rollback if data has been written to the recieving dataset.
-4. Chithi: For hostname checks for `syncoid:sync`, the machine's hostname must
+2. Chithi: For hostname checks for `syncoid:sync`, the machine's hostname must
 be less than 255 characters long.
-5. Chithi: We only support platforms which have the `-t` option for zfs, i.e. we
+3. Chithi: We only support platforms which have the `-t` option for zfs, i.e. we
 don't reimpelment the fallback snapshot fetching in syncoid. This means no
 solaris.
-6. Chithi: We use the regex-lite crate for rexeg, and therefore do not support
+4. Chithi: We use the regex-lite crate for rexeg, and therefore do not support
 unicode case insensitivity or unicode character classes like `\p{Letter}`.
 
 # Why Rust? Why Not Go?

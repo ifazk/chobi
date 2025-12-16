@@ -56,6 +56,10 @@ pub struct Args {
     #[arg(long)]
     pub no_rollback: bool,
 
+    /// Exclude specific datasets that match the given regular expression. Can be specified multiple times.
+    #[arg(long, value_name = "REGEX")]
+    pub exclude_datasets: Vec<Regex>,
+
     /// Exclude specific snapshots that match the given regular expression. Can be specified multiple times. If a snapshot matches both exclude-snaps and include-snaps patterns, then it will be excluded.
     #[arg(long, value_name = "REGEX")]
     pub exclude_snaps: Vec<Regex>,
