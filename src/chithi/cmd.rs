@@ -16,6 +16,7 @@
 
 use log::{debug, error};
 use std::{
+    borrow::Cow,
     fmt::Display,
     io,
     process::{Command, Output, Stdio, exit},
@@ -133,6 +134,29 @@ pub struct Cmd<'args, T> {
     args: T,
 }
 
+fn escape_str<'a>(s: &'a str) -> Cow<'a, str> {
+    if s.contains([
+        '#', '\'', '"', ' ', '\t', '\n', '\r', '|', '&', ';', '<', '>', '(', ')', '$', '*', '?',
+        '[', ']', '^', '!', '~', '%', '{', '}', //'=', ',', '-',
+    ]) {
+        let mut result = String::new();
+        result.push('\''); // start quote
+        for ch in s.chars() {
+            if ch == '\'' {
+                result.push('\''); // end quote
+                result.push_str("\\'"); // single quote that's escaped
+                result.push('\''); // restart quote
+            } else {
+                result.push(ch);
+            }
+        }
+        result.push('\''); // end quote
+        Cow::Owned(result)
+    } else {
+        Cow::Borrowed(s)
+    }
+}
+
 impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Cmd<'args, T> {
     pub fn new(target: &'args CmdTarget<'args>, sudo: bool, cmd: &'static str, args: T) -> Self {
         Self {
@@ -211,6 +235,12 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Cmd<'args, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let sudo = if self.sudo { "sudo " } else { "" };
         write!(f, "{}{}{}", self.target, sudo, self.base)?;
+        if self.target.is_remote() {
+            for &arg in self.args.as_ref() {
+                write!(f, " {}", escape_str(arg))?;
+            }
+            return Ok(());
+        }
         for &arg in self.args.as_ref() {
             write!(f, " {}", arg)?;
         }
@@ -236,6 +266,7 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> From<&Cmd<'args, T>> for Cmd<'args, Vec
     }
 }
 
+/// Builds a pipeline of commands that will be passed as a script via ssh or sh -c
 pub struct Pipeline<'args, T> {
     target: &'args CmdTarget<'args>,
     cmds: Vec<Cmd<'args, T>>,
@@ -262,9 +293,10 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Pipeline<'args, T> {
                 if let Some(inner) = self.cmds.first() {
                     use std::fmt::Write;
                     let mut arg = String::new();
-                    write!(arg, "{inner}").expect("formatting should not fail");
+                    write!(arg, "{}", Self::escape_cmd(inner)).expect("formatting should not fail");
                     for inner in &self.cmds[1..] {
-                        write!(arg, "| {inner}").expect("formatting should not fail");
+                        write!(arg, "| {}", Self::escape_cmd(inner))
+                            .expect("formatting should not fail");
                     }
                     cmd.arg(arg);
                 };
@@ -276,16 +308,46 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Pipeline<'args, T> {
                     cmd.args(["-o", option]);
                 }
                 cmd.arg(ssh.host);
-                if let Some(inner) = self.cmds.first() {
-                    cmd.arg(format!("{inner}"));
-                    for inner in &self.cmds[1..] {
+                // We don't have control over what shell is interpreting these
+                // bytes. Zsh really doesn't like foo#bar, so let's escape those
+                // and anthing that contains special shell characters.
+                if let Some(first) = self.cmds.first() {
+                    cmd.arg(Self::escape_cmd(first));
+                    for other in &self.cmds[1..] {
                         cmd.arg("|");
-                        cmd.arg(format!("{inner}"));
+                        cmd.arg(Self::escape_cmd(other));
                     }
                 };
                 cmd
             }
         }
+    }
+
+    fn escape_cmd(cmd: &Cmd<'args, T>) -> String {
+        let mut result = String::new();
+        if cmd.target.is_remote() {
+            let ssh = format!("{}", cmd.target);
+            result.push_str(&ssh);
+        }
+        if cmd.sudo {
+            result.push_str("sudo ");
+        }
+        result.push_str(cmd.base);
+        if cmd.target.is_remote() {
+            // potentially needs double escape
+            result.push(' ');
+            for &arg in cmd.args.as_ref() {
+                result.push(' ');
+                let arg = escape_str(arg);
+                result.push_str(&escape_str(&arg));
+            }
+            return result;
+        }
+        for &arg in cmd.args.as_ref() {
+            result.push(' ');
+            result.push_str(&escape_str(arg));
+        }
+        result
     }
 }
 
@@ -294,6 +356,12 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Pipeline<'args, T> {
         match self.target {
             CmdTarget::Local => {
                 write!(f, "sh -c -- ")?;
+                if let Some(cmd) = self.cmds.first() {
+                    write!(f, "{}", cmd)?;
+                    for cmd in &self.cmds[1..] {
+                        write!(f, "| {}", cmd)?;
+                    }
+                }
             }
             CmdTarget::Remote { ssh } => {
                 write!(f, "ssh ")?;
@@ -301,12 +369,12 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Pipeline<'args, T> {
                     write!(f, "-o {} ", option)?;
                 }
                 write!(f, "{} ", ssh.host)?;
-            }
-        }
-        if let Some(cmd) = self.cmds.first() {
-            write!(f, "{}", cmd)?;
-            for cmd in &self.cmds[1..] {
-                write!(f, "| {}", cmd)?;
+                if let Some(cmd) = self.cmds.first() {
+                    write!(f, "{}", Self::escape_cmd(cmd))?;
+                    for cmd in &self.cmds[1..] {
+                        write!(f, "| {}", Self::escape_cmd(cmd))?;
+                    }
+                }
             }
         }
         Ok(())
