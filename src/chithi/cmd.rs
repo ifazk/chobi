@@ -29,15 +29,23 @@ type SshOption = String;
 #[derive(PartialEq, Eq)]
 pub struct Ssh<'args> {
     host: &'args str,
+    control: Option<String>,
     options: &'args Vec<SshOption>,
 }
 
 impl<'args> Ssh<'args> {
     pub fn new(host: &'args str, options: &'args Vec<SshOption>) -> Self {
-        Self { host, options }
+        Self {
+            host,
+            control: None,
+            options,
+        }
     }
     pub fn to_cmd(&self) -> Command {
         let mut cmd = Command::new("ssh");
+        if let Some(control) = &self.control {
+            cmd.args(["-S", control]);
+        };
         for option in self.options {
             cmd.args(["-o", option]);
         }
@@ -97,6 +105,60 @@ impl<'args> CmdTarget<'args> {
             }
         }
     }
+    pub fn set_control(&mut self, control: Option<&str>) {
+        match self {
+            CmdTarget::Local => {}
+            CmdTarget::Remote { ssh } => ssh.control = control.map(|c| c.to_string()),
+        }
+    }
+    pub fn make_control(&mut self) -> Option<&str> {
+        match self {
+            CmdTarget::Local => None,
+            CmdTarget::Remote { ssh } => {
+                let host_sanitized: String = ssh
+                    .host
+                    .chars()
+                    .map(|c| if c == '@' { '-' } else { c })
+                    .filter(|&c| c.is_ascii_alphanumeric() || c == '-')
+                    .take(50)
+                    .collect();
+                let (year, mon, mday, hour, min, sec) = {
+                    use chrono::{Datelike, Timelike};
+                    let local = chrono::Local::now();
+                    let year = local.year();
+                    let mon = local.month();
+                    let mday = local.day();
+                    let hour = local.hour();
+                    let min = local.minute();
+                    let sec = local.second();
+                    (year, mon, mday, hour, min, sec)
+                };
+                let id = std::process::id();
+                let rand = rand::random_range(0..1000u32);
+                let control = format!(
+                    "/tmp/chithi-{host_sanitized}-{year:04}{mon:02}{mday:02}{hour:02}{min:02}{sec:02}-{id}-{rand}"
+                );
+                let mut cmd = Command::new("ssh");
+                // TODO ssh port?
+                cmd.args([
+                    "-M",
+                    "-S",
+                    &control,
+                    "-o",
+                    "ControlPersist=1m",
+                    ssh.host,
+                    "exit",
+                ]);
+                match cmd.status() {
+                    Ok(exit) if exit.success() => {
+                        ssh.control = Some(control);
+                        ssh.control.as_deref()
+                    }
+                    _ => None,
+                }
+            }
+        }
+    }
     pub fn on_str(&self) -> &str {
         match self {
             CmdTarget::Local => "",
@@ -117,6 +179,9 @@ impl<'args> Display for CmdTarget<'args> {
             CmdTarget::Local => {}
             CmdTarget::Remote { ssh } => {
                 write!(f, "ssh ")?;
+                if let Some(control) = &ssh.control {
+                    write!(f, "{} ", control)?;
+                }
                 for option in ssh.options {
                     write!(f, "-o {} ", option)?;
                 }
@@ -304,6 +369,9 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Pipeline<'args, T> {
             }
             CmdTarget::Remote { ssh } => {
                 let mut cmd = Command::new("ssh");
+                if let Some(control) = &ssh.control {
+                    cmd.args(["-S", control]);
+                }
                 for option in ssh.options {
                     cmd.args(["-o", option]);
                 }
@@ -365,6 +433,9 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Pipeline<'args, T> {
             }
             CmdTarget::Remote { ssh } => {
                 write!(f, "ssh ")?;
+                if let Some(control) = &ssh.control {
+                    write!(f, "-S {control} ")?;
+                }
                 for option in ssh.options {
                     write!(f, "-o {} ", option)?;
                 }

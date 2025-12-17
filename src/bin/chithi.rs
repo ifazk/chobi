@@ -111,8 +111,8 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
     }
 
     pub fn check_ssh_if_needed(
-        source_cmd_target: &CmdTarget,
-        target_cmd_target: &CmdTarget,
+        source_cmd_target: &mut CmdTarget,
+        target_cmd_target: &mut CmdTarget,
         local_cmd_target: &CmdTarget,
         no_command_checks: bool,
     ) -> io::Result<()> {
@@ -125,6 +125,15 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             if !ssh_exists {
                 error!("there are remote targets, but ssh does not exist in local system");
                 exit(1);
+            }
+        }
+        if source_cmd_target.is_remote() || target_cmd_target.is_remote() {
+            if source_cmd_target.host() == target_cmd_target.host() {
+                let source_control = source_cmd_target.make_control();
+                target_cmd_target.set_control(source_control);
+            } else {
+                source_cmd_target.make_control();
+                target_cmd_target.make_control();
             }
         }
         Ok(())
@@ -1077,19 +1086,17 @@ fn main() -> io::Result<()> {
 
     trace!("built fs");
 
-    // TODO get ssh master
-
     // Build command targets
-    let source_cmd_target = CmdTarget::new(source.host, &args.ssh_options);
-    let target_cmd_target = CmdTarget::new(target.host, &args.ssh_options);
+    let mut source_cmd_target = CmdTarget::new(source.host, &args.ssh_options);
+    let mut target_cmd_target = CmdTarget::new(target.host, &args.ssh_options);
     let local_cmd_target = CmdTarget::new_local();
 
     trace!("built cmd targets");
 
     // Build command configs
     CmdConfig::check_ssh_if_needed(
-        &source_cmd_target,
-        &target_cmd_target,
+        &mut source_cmd_target,
+        &mut target_cmd_target,
         &local_cmd_target,
         args.no_command_checks,
     )?;
