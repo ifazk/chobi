@@ -21,6 +21,7 @@ don't reimpelment the fallback snapshot fetching in syncoid. This means no
 solaris.
 4. Chithi: We use the regex-lite crate for rexeg, and therefore do not support
 unicode case insensitivity or unicode character classes like `\p{Letter}`.
+5. Chithi: Not supporting insecure direct connection.
 
 # Why Rust? Why Not Go?
 There are no technical or social reasons why I'm choosing Rust. Go would have
@@ -28,7 +29,7 @@ been a better option, which I also have some experience with. But I just happen
 to be mainly using Rust right now, and so things will be quicker to implement on
 my end.
 
-# Rust note
+# Development note
 It is an explicit goal to be single threaded, and use non-blocking code without
 busy spinning. There should not be any thread spawning code anywhere here. It is
 also an explicit goal to only rely on posix instead of needing separate special
@@ -36,7 +37,24 @@ case code for Linux and FreeBSD.
 
 # ETA when?
 Perhaps never. If I get to understand all the features of sanoid and syncoid
-through this project, that's more than enough for me.
+through this project, that's more than enough for me. That being said I will
+release the binary for chithi if I finish the following features.
+
+## Current TODOs for Chithi
+
+- Clone Handling
+- Bookmark support
+- Compression
+- Bandwidth limits
+- Preserve properties
+- Compatibility flags
+   + Use 'chithi:sync' but allow fallback to check for 'syncoid:sync'
+   + Allow format flags for pruning both syncoid and chithi sync snaps
+- Cleanup
+  + Manage holds
+  + Manage bookmarks
+  + Manage sync snaps
+  + Manage target snapshots
 
 # Contributing
 I am not accepting PRs or contributions to the project. The project isn't ready
@@ -57,7 +75,7 @@ you have to deal with some messy escaping and parsing).  So my current work flow
 looks like this:
 
 - Have default push/pull services that push/pull to/from a single remote pool.
-(e.g. syncoid-push-tank-rpool@.service syncoid-pull-tank-rpool@.service)
+(e.g. syncoid-push-tank@.service syncoid-pull-tank@.service)
 
 - For each pair of pools that need to sync, add another set of services (e.g.
 syncoid-push-tank-rpool@.service syncoid-pull-tank-rpool@.service).
