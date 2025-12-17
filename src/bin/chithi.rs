@@ -22,6 +22,7 @@ use clap::Parser;
 use log::{debug, error, info, trace, warn};
 use regex_lite::Regex;
 use std::cell::LazyCell;
+use std::io::IsTerminal;
 use std::{
     collections::{HashMap, HashSet},
     io::{self, BufRead, BufReader, Write},
@@ -71,16 +72,113 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         }
         // TODO
         let mut optional_cmds = HashMap::new();
-        let local_pv = Cmd::new(
-            local_cmd_target,
-            false,
-            "pv",
-            args.pv_options.split_whitespace().collect::<Vec<_>>(),
-        );
-        if !args.no_command_checks || local_pv.to_check().output()?.status.success() {
-            optional_cmds.insert("localpv", local_pv);
+        // PV command
+        if std::io::stderr().is_terminal() {
+            if source_cmd_target.host() == target_cmd_target.host() {
+                // use source pv
+                let source_pv = Cmd::new(
+                    source_cmd_target,
+                    false,
+                    "pv",
+                    args.pv_options.split_whitespace().collect::<Vec<_>>(),
+                );
+                if args.no_command_checks || source_pv.to_check().output()?.status.success() {
+                    optional_cmds.insert("sourcepv", source_pv.to_local());
+                } else {
+                    warn!(
+                        "pv not available on {} - sync will continue without progress bar",
+                        source_cmd_target.pretty_str()
+                    );
+                }
+            } else {
+                // use local pv
+                let local_pv = Cmd::new(
+                    local_cmd_target,
+                    false,
+                    "pv",
+                    args.pv_options.split_whitespace().collect::<Vec<_>>(),
+                );
+                if args.no_command_checks || local_pv.to_check().output()?.status.success() {
+                    optional_cmds.insert("localpv", local_pv);
+                } else {
+                    warn!(
+                        "pv not available on local machine - sync will continue without progress bar"
+                    );
+                }
+            }
         } else {
-            warn!("pv not available on local machine - sync will continue without progress bar");
+            warn!("stderr is not a terminal - sync with continue without progress bar")
+        };
+        // Compression
+        if let Some(compress) = args.compress.to_cmd() {
+            let source_compress = Cmd::new(
+                source_cmd_target,
+                false,
+                compress.base,
+                compress.args.to_vec(),
+            );
+            let target_decompress = Cmd::new(
+                target_cmd_target,
+                false,
+                compress.decompress,
+                compress.decompress_args.to_vec(),
+            );
+            let local_compress = Cmd::new(
+                local_cmd_target,
+                false,
+                compress.base,
+                compress.args.to_vec(),
+            );
+            let local_decompress = Cmd::new(
+                local_cmd_target,
+                false,
+                compress.decompress,
+                compress.decompress_args.to_vec(),
+            );
+            if args.no_command_checks || source_compress.to_check().output()?.status.success() {
+                if args.no_command_checks || target_decompress.to_check().output()?.status.success()
+                {
+                    if source_cmd_target.is_remote()
+                        && target_cmd_target.is_remote()
+                        && source_cmd_target.host() != target_cmd_target.host()
+                    {
+                        if args.no_command_checks
+                            || (local_compress.to_check().output()?.status.success()
+                                && local_decompress.to_check().output()?.status.success())
+                        {
+                            optional_cmds.insert("sourcecompress", source_compress.to_local());
+                            optional_cmds.insert("targetcompress", target_decompress.to_local());
+                            optional_cmds.insert("localcompress", local_compress);
+                            optional_cmds.insert("localdecompress", local_decompress);
+                        } else {
+                            let (nd, decompress) = if compress.base != compress.decompress {
+                                ("and", compress.decompress)
+                            } else {
+                                ("", "")
+                            };
+                            warn!(
+                                "{}{}{} not available on local machine - sync will continue without compression",
+                                compress.base, nd, decompress
+                            );
+                        }
+                    } else {
+                        optional_cmds.insert("sourcecompress", source_compress.to_local());
+                        optional_cmds.insert("targetcompress", target_decompress.to_local());
+                    }
+                } else {
+                    warn!(
+                        "{} not available on {} - sync will continue without compression",
+                        compress.decompress,
+                        target_cmd_target.pretty_str()
+                    );
+                }
+            } else {
+                warn!(
+                    "{} not available on {} - sync will continue without compression",
+                    compress.base,
+                    source_cmd_target.pretty_str()
+                );
+            }
         }
         // TODO
         let optional_features = HashSet::new();
@@ -184,8 +282,9 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             error!("failed to check if target filesystem {fs} exists");
             exit(1);
         }
-        // TODO why is this correct? "pool/foobar" begins with "pool/foo", but
-        // are different file systems. is this a bug in syncoid?
+        // zfs get -H name only returns a single output, and we check if this
+        // output matches the fs name. Syncoid does this using a prefix check,
+        // and so do we.
         Ok(output.stdout[..].starts_with(fs.fs.as_bytes()))
     }
 
@@ -353,35 +452,58 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
     }
 
     // We build one or two shell pipes, depending on whether the hosts are the same or not
-    fn build_sync_pipelines<'cmd, T: AsRef<[&'cmd str]>>(
+    fn build_sync_pipelines<'cmd>(
         &self,
-        send_cmd: Cmd<'args, T>,
-        recv_cmd: Cmd<'args, T>,
-        _pv_size: u64,
-    ) -> (Pipeline<'args, T>, Option<Pipeline<'args, T>>) {
-        let mut source_pipeline = Pipeline::new(self.source_cmd_target, send_cmd);
-        let mut target_pipeline_maybe = None;
+        send_cmd: Cmd<'args, Vec<&'cmd str>>,
+        recv_cmd: Cmd<'args, Vec<&'cmd str>>,
+        pv_size_str: &'cmd str,
+    ) -> (
+        Pipeline<'args, Vec<&'cmd str>>,
+        Option<Pipeline<'args, Vec<&'cmd str>>>,
+    )
+    where
+        'args: 'cmd,
+    {
+        let source_pv = self
+            .optional_cmds
+            .get("sourcepv")
+            .map(Cmd::to_mut)
+            .map(|mut source_pv| {
+                if pv_size_str != "0" {
+                    source_pv.arg("-s");
+                    source_pv.arg(pv_size_str);
+                }
+                source_pv
+            });
+        let source_compress = self.optional_cmds.get("sourcecompress").map(Cmd::to_mut);
+        let target_compress = self.optional_cmds.get("targetcompress").map(Cmd::to_mut);
         if self.source_cmd_target == self.target_cmd_target {
             // both local or same host and same user
             // TODO add commands
-            source_pipeline.add_cmd(recv_cmd);
-        } else if self.source_cmd_target.is_remote() && !self.target_cmd_target.is_remote() {
+            // no compression when on same host
+            let source_pipeline = [Some(send_cmd), source_pv, Some(recv_cmd)];
+            let source_pipeline = Pipeline::from(
+                self.source_cmd_target,
+                source_pipeline.into_iter().flatten().collect(),
+            )
+            .expect("contains some");
+            (source_pipeline, None)
+        } else {
             // pull
             // TODO add commands
-            let target_pipeline = Pipeline::new(self.target_cmd_target, recv_cmd);
-            target_pipeline_maybe = Some(target_pipeline);
-        } else if !self.source_cmd_target.is_remote() && self.target_cmd_target.is_remote() {
-            // push
-            // TODO add commands
-            let target_pipeline = Pipeline::new(self.target_cmd_target, recv_cmd);
-            target_pipeline_maybe = Some(target_pipeline);
-        } else {
-            // both remote with different hosts or different users
-            // TODO add commands
-            let target_pipeline = Pipeline::new(self.target_cmd_target, recv_cmd);
-            target_pipeline_maybe = Some(target_pipeline);
+            let source_pipeline = [Some(send_cmd), source_pv, source_compress];
+            let source_pipeline = Pipeline::from(
+                self.source_cmd_target,
+                source_pipeline.into_iter().flatten().collect(),
+            )
+            .expect("contains some");
+            let target_pipeline = [target_compress, Some(recv_cmd)];
+            let target_pipeline = Pipeline::from(
+                self.target_cmd_target,
+                target_pipeline.into_iter().flatten().collect(),
+            );
+            (source_pipeline, target_pipeline)
         }
-        (source_pipeline, target_pipeline_maybe)
     }
 
     fn run_sync_cmd(
@@ -392,6 +514,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         target: &Fs,
         pv_size: u64,
     ) -> io::Result<()> {
+        let pv_size_str = pv_size.to_string();
         let _disp_pv_size = ReadableBytes::from(pv_size);
         let send_options = if send_from.0 == Some("-t") {
             self.args
@@ -444,7 +567,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             args.push(&target.fs);
             Cmd::new(&CmdTarget::Local, !self.target_is_root, "zfs", args)
         };
-        let pipelines = self.build_sync_pipelines(send_cmd, recv_cmd, pv_size);
+        let mut pipelines = self.build_sync_pipelines(send_cmd, recv_cmd, &pv_size_str);
         if self.is_zfs_busy(target)? {
             warn!("Cannot sync now: {target} is already target of a zfs recv process");
             exit(1);
@@ -460,14 +583,25 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             }
             return Ok(());
         }
-        match &pipelines {
+        match &mut pipelines {
             (pipeline, None) => {
+                let use_source_pv = self.optional_cmds.contains_key("sourcepv");
+                if use_source_pv {
+                    pipeline.use_terminal_if_ssh(true);
+                }
+                debug!("pipeline: {pipeline}");
                 let mut cmd = pipeline.to_cmd();
-                let output = cmd
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::inherit())
-                    .stderr(Stdio::piped())
-                    .output()?;
+                // TODO test for terminal and set -t for ssh if remote command
+                if use_source_pv && pipeline.is_remote() {
+                    // worse error checking in this case, but we output the
+                    // errors, so should be ok
+                    cmd.stderr(Stdio::inherit());
+                    // ssh does not like it if stdio is not a terminal
+                    cmd.stdin(Stdio::inherit())
+                } else {
+                    cmd.stdin(Stdio::null()).stderr(Stdio::piped())
+                };
+                let output = cmd.stdout(Stdio::inherit()).output()?;
                 if !output.status.success() {
                     let err = String::from_utf8_lossy(&output.stderr);
                     return Err(io::Error::other(err));
@@ -478,11 +612,25 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 let mut source_cmd = source_pipeline.to_cmd();
                 debug!("target pipeline: {target_pipeline}");
                 let mut target_cmd = target_pipeline.to_cmd();
+                let local_decompress = self.optional_cmds.get("localdecompress");
+                let local_compress = self.optional_cmds.get("localcompress");
                 let mut pv_cmd = self.optional_cmds.get("localpv").map(|pv| {
-                    let mut pv = pv.to_cmd();
-                    pv.arg("-s");
-                    pv.arg(pv_size.to_string());
-                    pv
+                    let mut pv = pv.to_mut();
+                    if pv_size != 0 {
+                        pv.arg("-s");
+                        pv.arg(&pv_size_str);
+                    }
+                    if let Some(local_decompress) = local_decompress
+                        && let Some(local_compress) = local_compress
+                    {
+                        let mut pipeline =
+                            Pipeline::new(&CmdTarget::Local, local_decompress.to_mut());
+                        pipeline.add_cmd(pv);
+                        pipeline.add_cmd(local_compress.to_mut());
+                        pipeline.to_cmd()
+                    } else {
+                        pv.to_cmd()
+                    }
                 });
                 let (source_output, target_output) =
                     pipe_and_capture_stderr(&mut source_cmd, pv_cmd.as_mut(), &mut target_cmd)?;

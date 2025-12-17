@@ -19,6 +19,7 @@
 
 mod args;
 mod cmd;
+pub mod compress;
 mod fs;
 pub mod send_recv_opts;
 pub mod sys;

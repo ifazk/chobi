@@ -44,7 +44,6 @@ release the binary for chithi if I finish the following features.
 
 - Clone Handling
 - Bookmark support
-- Compression
 - Bandwidth limits
 - Preserve properties
 - Compatibility flags

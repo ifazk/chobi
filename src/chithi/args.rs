@@ -1,3 +1,4 @@
+use crate::chithi::compress::Compress;
 use crate::chithi::send_recv_opts::{OptionsLine, Opts};
 use bw::Bytes;
 use clap::Parser;
@@ -12,8 +13,8 @@ pub struct Args {
     /// Compresses data during transfer. Currently accepted options are gzip,
     /// pigz-fast, pigz-slow, zstd-fast, zstdmt-fast, zstd-slow, zstdmt-slow,
     /// lz4, xz, lzo & none
-    #[arg(long, default_value = "lzo", value_name = "FORMAT")]
-    pub compress: String,
+    #[arg(long, default_value = "lzo", value_name = "FORMAT", value_parser = Compress::try_from_str)]
+    pub compress: Compress,
 
     /// Extra identifier which is included in the snapshot name. Can be used for
     /// replicating to multiple targets.

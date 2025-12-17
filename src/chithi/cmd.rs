@@ -171,6 +171,12 @@ impl<'args> CmdTarget<'args> {
             CmdTarget::Remote { ssh } => ssh.host,
         }
     }
+    pub fn pretty_str(&self) -> &'args str {
+        match self {
+            CmdTarget::Local => "local machine",
+            CmdTarget::Remote { ssh } => ssh.host,
+        }
+    }
 }
 
 impl<'args> Display for CmdTarget<'args> {
@@ -197,6 +203,17 @@ pub struct Cmd<'args, T> {
     sudo: bool,
     base: &'static str,
     args: T,
+}
+
+impl<'args, T> Cmd<'args, T> {
+    pub fn to_local(self) -> Self {
+        Self {
+            target: &CmdTarget::Local,
+            sudo: self.sudo,
+            base: self.base,
+            args: self.args,
+        }
+    }
 }
 
 fn escape_str<'a>(s: &'a str) -> Cow<'a, str> {
@@ -334,6 +351,7 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> From<&Cmd<'args, T>> for Cmd<'args, Vec
 /// Builds a pipeline of commands that will be passed as a script via ssh or sh -c
 pub struct Pipeline<'args, T> {
     target: &'args CmdTarget<'args>,
+    use_terminal_if_ssh: bool,
     cmds: Vec<Cmd<'args, T>>,
 }
 
@@ -341,11 +359,31 @@ impl<'args, T> Pipeline<'args, T> {
     pub fn new(target: &'args CmdTarget<'args>, cmd: Cmd<'args, T>) -> Self {
         Self {
             target,
+            use_terminal_if_ssh: false,
             cmds: vec![cmd],
         }
     }
     pub fn add_cmd(&mut self, cmd: Cmd<'args, T>) {
         self.cmds.push(cmd);
+    }
+    pub fn is_remote(&self) -> bool {
+        self.target.is_remote()
+    }
+    pub fn use_terminal_if_ssh(&mut self, value: bool) {
+        self.use_terminal_if_ssh = value;
+    }
+    /// return none if input is empty
+    pub fn from(target: &'args CmdTarget<'args>, mut from: Vec<Cmd<'args, T>>) -> Option<Self> {
+        from.reverse();
+        if let Some(first) = from.pop() {
+            let mut pipeline = Self::new(target, first);
+            while let Some(other) = from.pop() {
+                pipeline.add_cmd(other);
+            }
+            Some(pipeline)
+        } else {
+            None
+        }
     }
 }
 
@@ -369,6 +407,9 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Pipeline<'args, T> {
             }
             CmdTarget::Remote { ssh } => {
                 let mut cmd = Command::new("ssh");
+                if self.use_terminal_if_ssh {
+                    cmd.args(["-t", "-o", "LogLevel=QUIET"]);
+                }
                 if let Some(control) = &ssh.control {
                     cmd.args(["-S", control]);
                 }
@@ -427,12 +468,15 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Pipeline<'args, T> {
                 if let Some(cmd) = self.cmds.first() {
                     write!(f, "{}", cmd)?;
                     for cmd in &self.cmds[1..] {
-                        write!(f, "| {}", cmd)?;
+                        write!(f, " | {}", cmd)?;
                     }
                 }
             }
             CmdTarget::Remote { ssh } => {
                 write!(f, "ssh ")?;
+                if self.use_terminal_if_ssh {
+                    write!(f, "-t -o LogLevel=QUIET ")?;
+                }
                 if let Some(control) = &ssh.control {
                     write!(f, "-S {control} ")?;
                 }
@@ -443,7 +487,7 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Pipeline<'args, T> {
                 if let Some(cmd) = self.cmds.first() {
                     write!(f, "{}", Self::escape_cmd(cmd))?;
                     for cmd in &self.cmds[1..] {
-                        write!(f, "| {}", Self::escape_cmd(cmd))?;
+                        write!(f, " | {}", Self::escape_cmd(cmd))?;
                     }
                 }
             }
