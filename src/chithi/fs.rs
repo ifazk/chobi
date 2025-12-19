@@ -116,7 +116,19 @@ impl<'args> Fs<'args> {
         };
         let mut target_dataset = self.fs.to_string();
         target_dataset.push_str(dataset);
-        Ok(self.new_child(target_dataset, "-".to_string()))
+        let target_origin = child
+            .origin
+            .as_ref()
+            .and_then(|child_origin| child_origin.strip_prefix(source.fs.as_ref()))
+            .map(|target_origin_dataset_snapshot| {
+                let mut target_origin_full_snapshot = self.fs.to_string();
+                target_origin_full_snapshot.push_str(target_origin_dataset_snapshot);
+                target_origin_full_snapshot
+            });
+        Ok(self.new_child(
+            target_dataset,
+            target_origin.unwrap_or_else(|| "-".to_string()),
+        ))
     }
 }
 
