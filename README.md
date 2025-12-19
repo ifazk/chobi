@@ -46,6 +46,7 @@ release the binary for chithi if I finish the following features.
 - Bookmark support
 - Bandwidth limits
 - Preserve properties
+- Check for ZFS resume feature before using it
 - Compatibility flags
    + Use 'chithi:sync' but allow fallback to check for 'syncoid:sync'
    + Allow format flags for pruning both syncoid and chithi sync snaps

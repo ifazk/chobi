@@ -81,6 +81,14 @@ pub struct Args {
     #[arg(short = 'o', long = "sshoption", value_name = "OPTION")]
     pub ssh_options: Vec<String>,
 
+    /// Prints out a lot of additional information during a chithi run. Logs overridden by --quiet and RUST_LOG environment variable
+    #[arg(long)]
+    pub debug: bool,
+
+    /// Supresses non-error output and progress bars. Logs overridden by RUST_LOG environment variable
+    #[arg(long)]
+    pub quiet: bool,
+
     /// Dumps a list of snapshots during the run
     #[arg(long)]
     pub dump_snaps: bool,
@@ -89,7 +97,7 @@ pub struct Args {
     #[arg(long)]
     pub no_command_checks: bool,
 
-    /// Do a dry run, without modify datasets and pool
+    /// Do a dry run, without modifying datasets and pools
     #[arg(long)]
     pub dry_run: bool,
 

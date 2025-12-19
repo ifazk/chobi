@@ -19,7 +19,7 @@ use std::{
     borrow::Cow,
     fmt::Display,
     io,
-    process::{Command, Output, Stdio, exit},
+    process::{Command, Output, Stdio},
 };
 
 use crate::chithi::sys;
@@ -274,18 +274,17 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Cmd<'args, T> {
     pub fn check_exists(&self) -> io::Result<()> {
         let exists = self.to_check().output()?.status.success();
         if !exists {
-            let local = if self.target.is_remote() {
-                ""
-            } else {
-                "local system"
-            };
-            error!("{} does not exist in {}{local}", self.base, self.target);
-            exit(1);
+            error!(
+                "{} does not exist in {}",
+                self.base,
+                self.target.pretty_str()
+            );
+            return Err(io::Error::new(io::ErrorKind::NotFound, "command not found"));
         }
         Ok(())
     }
 
-    /// Run command printing and catputuring output
+    /// Run command printing and catputuring output (stdout and stderr)
     pub fn capture(&self) -> io::Result<Output> {
         let mut command = self.to_cmd();
         sys::capture(&mut command)

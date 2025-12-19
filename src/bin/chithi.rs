@@ -25,8 +25,8 @@ use std::cell::LazyCell;
 use std::io::IsTerminal;
 use std::{
     collections::{HashMap, HashSet},
-    io::{self, BufRead, BufReader, Write},
-    process::{Stdio, exit},
+    io::{self, BufRead, BufReader},
+    process::Stdio,
 };
 
 const DOES_NOT_EXIST: &str = "dataset does not exist";
@@ -73,7 +73,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         // TODO
         let mut optional_cmds = HashMap::new();
         // PV command
-        if std::io::stderr().is_terminal() {
+        if std::io::stderr().is_terminal() && !args.quiet {
             if source_cmd_target.host() == target_cmd_target.host() {
                 // use source pv
                 let source_pv = Cmd::new(
@@ -106,6 +106,8 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                     );
                 }
             }
+        } else if args.quiet {
+            // no warnings, no progress bars is what we want
         } else {
             warn!("stderr is not a terminal - sync with continue without progress bar")
         };
@@ -222,7 +224,10 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 .success();
             if !ssh_exists {
                 error!("there are remote targets, but ssh does not exist in local system");
-                exit(1);
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "ssh not found in local system",
+                ));
             }
         }
         if source_cmd_target.is_remote() || target_cmd_target.is_remote() {
@@ -251,6 +256,8 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         let _ps_process = AutoKill::new(ps_process);
         let ps_stdout = BufReader::new(ps_stdout);
 
+        // if in recv lines look like
+        // zfs receive <FLAGS|OPTIONS> <poolname>/<dataset>
         for line in ps_stdout.lines() {
             let line = line?;
             if let Some(line_prefix) = line.strip_suffix(fs.fs.as_ref())
@@ -264,13 +271,48 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         Ok(false)
     }
 
+    fn is_zfs_busy_for(&self, fss: &[Fs]) -> io::Result<bool> {
+        debug!(
+            "checking if already in zfs receive using {} ...",
+            self.target_ps
+        );
+
+        let mut ps_cmd = self.target_ps.to_cmd();
+        ps_cmd.stdout(Stdio::piped());
+        let mut ps_process = ps_cmd.spawn()?;
+
+        let ps_stdout = ps_process.stdout.take().expect("handle present");
+        let _ps_process = AutoKill::new(ps_process);
+        let ps_stdout = BufReader::new(ps_stdout);
+
+        // if in recv lines look like
+        // zfs receive <FLAGS|OPTIONS> <poolname>/<dataset>
+        for line in ps_stdout.lines() {
+            let line = line?;
+            for fs in fss {
+                if let Some(line_prefix) = line.strip_suffix(fs.fs.as_ref())
+                    && self.zfs_recv.is_match(line_prefix)
+                {
+                    debug!("process {line} matches target {fs}");
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
     fn target_exists(&self, fs: &Fs) -> io::Result<bool> {
         // We don't use get_zfs_value(fs, "name") here to avoid printing the error value
         let mut target_zfs = self.target_zfs.to_mut();
         target_zfs.args(["get", "-H", "name"]);
         target_zfs.arg(fs.fs.as_ref());
         debug!("checking if target filesystem {fs} exists using {target_zfs}...");
-        let output = target_zfs.capture()?;
+        let output = if self.args.debug {
+            target_zfs.capture()?
+        } else {
+            target_zfs.to_cmd().output()?
+        };
         if !output.status.success() {
             if output
                 .stderr
@@ -280,7 +322,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 return Ok(false);
             }
             error!("failed to check if target filesystem {fs} exists");
-            exit(1);
+            return Err(io::Error::other("failed to check if target exists"));
         }
         // zfs get -H name only returns a single output, and we check if this
         // output matches the fs name. Syncoid does this using a prefix check,
@@ -315,7 +357,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         let output = source_zfs.capture_stdout()?;
         if !output.status.success() {
             error!("failed to get child datasets for {fs}");
-            exit(1);
+            return Err(io::Error::other("failed to get child datasets"));
         }
         let mut children = Vec::new();
         let mut parent_processed = false;
@@ -362,9 +404,11 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         zfs.args(property);
         zfs.arg(&fs.fs);
         debug!("getting current value of {property_nice} on {fs} using {zfs}...");
-        let output = zfs.capture()?;
-        // Output err since we're not inheriting
-        io::stderr().write_all(&output.stderr)?;
+        let output = if self.args.debug {
+            zfs.capture()?
+        } else {
+            zfs.to_cmd().output()?
+        };
 
         // handle does not exist
         let err_bytes = &output.stderr[..];
@@ -378,7 +422,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         if !output.status.success() {
             // other error
             error!("failed to get property {property_nice} for {fs}");
-            exit(1);
+            return Err(io::Error::other("failed to get zfs property"));
         };
         let stdout = output.stdout;
         let stdout = str::from_utf8(&stdout)
@@ -431,7 +475,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         let output = source_zfs.capture_stdout()?;
         if !output.status.success() {
             error!("failed to get estimated size for {}", from_to.join(" "));
-            exit(1);
+            return Err(io::Error::other("failed to get estimated send size"));
         };
         let output = String::from_utf8_lossy(&output.stdout);
         // The last line of the multiline output is the size, but we need to
@@ -570,7 +614,10 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         let mut pipelines = self.build_sync_pipelines(send_cmd, recv_cmd, &pv_size_str);
         if self.is_zfs_busy(target)? {
             warn!("Cannot sync now: {target} is already target of a zfs recv process");
-            exit(1);
+            return Err(io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                "target is already in zfs recv",
+            ));
         }
         if self.args.dry_run {
             if let Some(other_pipeline) = pipelines.1 {
@@ -632,8 +679,12 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                         pv.to_cmd()
                     }
                 });
-                let (source_output, target_output) =
-                    pipe_and_capture_stderr(&mut source_cmd, pv_cmd.as_mut(), &mut target_cmd)?;
+                let (source_output, target_output) = pipe_and_capture_stderr(
+                    &mut source_cmd,
+                    pv_cmd.as_mut(),
+                    &mut target_cmd,
+                    self.args.debug,
+                )?;
                 if !source_output.status.success() || !target_output.status.success() {
                     // We've already output the errors, but let's distinguish
                     // between source and target errors here
@@ -662,21 +713,23 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         self.run_sync_cmd(source, send_from, None, target, pv_size)
     }
 
-    fn reset_recv_state(&self, target: &Fs) {
+    fn reset_recv_state(&self, target: &Fs) -> io::Result<()> {
         let mut target_zfs = self.target_zfs.to_mut();
         target_zfs.args(["receive", "-A", &target.fs]);
         debug!("reset partial recv state of {target} using {target_zfs}...");
         match target_zfs.to_cmd().stderr(Stdio::inherit()).status() {
-            Ok(exit) if exit.success() => {}
+            Ok(exit) if exit.success() => Ok(()),
             Ok(fail) => {
                 error!("resetting partial recv state failed with: {fail}");
-                exit(0);
+                Err(io::Error::other("resetting recv state was unsuccessful"))
             }
             Err(e) => {
                 error!("resetting partial recv state failed with: {e}");
-                exit(0);
+                Err(io::Error::other(
+                    "resetting recv state failed with an error",
+                ))
             }
-        };
+        }
     }
 
     fn sync_full(&self, source: &Fs, target: &Fs, snapshot: String) -> io::Result<()> {
@@ -903,7 +956,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
             if !output.status.success() {
                 error!("failed to create snapshot {fs_snapshot}");
-                exit(2);
+                return Err(io::Error::other("failed to create snapshot"));
             }
         } else {
             debug!("dry-run not running zfs snapshot {fs_snapshot}...");
@@ -989,7 +1042,10 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         // Check that zfs is not in recv
         if self.is_zfs_busy(target)? {
             warn!("Cannot sync now: {target} is already target of a zfs recv process");
-            exit(1);
+            return Err(io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                "target is already in zfs recv",
+            ));
         }
 
         // Check if target exists
@@ -1019,7 +1075,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 warn!(
                     "resetting partially receive state because the snapshot source no longer exists"
                 );
-                self.reset_recv_state(target);
+                self.reset_recv_state(target)?;
             } else {
                 resume_res?;
             }
@@ -1219,7 +1275,15 @@ fn main() -> io::Result<()> {
 
     // TODO: validate send and recv options and conflicts
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    let default_log = if args.quiet {
+        "error"
+    } else if args.debug {
+        "debug"
+    } else {
+        "info"
+    };
+
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_log))
         .format_timestamp(None)
         .format_target(false)
         .init();
@@ -1266,13 +1330,30 @@ fn main() -> io::Result<()> {
         // Get child datasets
         let datasets = cmds.get_child_datasets(&source)?;
         if datasets.is_empty() {
-            error!("no datasets found");
-            exit(1);
+            error!("no source datasets found");
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "no source datasets found",
+            ));
         }
-        for fs in datasets {
-            // assume no clone handling
-            let child_target = target.child_from_source(&source, &fs)?;
-            cmds.sync_dataset(&fs, &child_target, false)?;
+        // assume no clone handling for now
+        let targets = {
+            let mut targets = Vec::new();
+            for fs in &datasets {
+                let child_target = target.child_from_source(&source, fs)?;
+                targets.push(child_target)
+            }
+            // Do an early check for any busy children
+            if cmds.is_zfs_busy_for(&targets)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::ResourceBusy,
+                    "one of the child datasets are in recv",
+                ));
+            }
+            targets
+        };
+        for (fs, child_target) in datasets.iter().zip(targets.iter()) {
+            cmds.sync_dataset(fs, child_target, false)?;
         }
     }
 

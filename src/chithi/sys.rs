@@ -92,7 +92,7 @@ fn poll_ended(revents: libc::c_short) -> bool {
     revents & libc::POLLHUP != 0
 }
 
-/// Run command and both prints and captures outputs
+/// Run command and both prints and captures outputs (stdout and stderr)
 pub fn capture(command: &mut process::Command) -> io::Result<process::Output> {
     use io::{Read, Write};
     use process::{ExitStatus, Stdio};
@@ -218,11 +218,12 @@ pub fn try_terminate_if_running(child: &mut process::Child) -> io::Result<()> {
     }
 }
 
-/// Run command and both prints and captures outputs
+/// Run command and captures outputs. Also prints the errs if output_errs is true
 pub fn pipe_and_capture_stderr(
     main: &mut process::Command,
     pv: Option<&mut process::Command>,
     other: &mut process::Command,
+    output_errs: bool,
 ) -> io::Result<(process::Output, process::Output)> {
     use process::Stdio;
 
@@ -291,7 +292,7 @@ pub fn pipe_and_capture_stderr(
         &mut children,
         &mut [main_err, other_err],
         4096,
-        io::stderr(),
+        output_errs.then(io::stderr),
     )?;
 
     let pv_status = pv_child.as_mut().map(|pv_child| pv_child.wait());
@@ -325,7 +326,7 @@ pub fn read_until_hup<T: io::Read + AsRawFd, S: io::Write>(
     children: &mut [std::process::Child],
     reads: &mut [T],
     buf_size: usize,
-    mut our_output: S,
+    mut our_output: Option<S>,
 ) -> io::Result<Vec<(Vec<u8>, process::ExitStatus)>> {
     let mut statuses = vec![None; children.len()];
     // Set child fds to non-blocking
@@ -370,7 +371,9 @@ pub fn read_until_hup<T: io::Read + AsRawFd, S: io::Write>(
                 match reads[idx].read(&mut readbuf) {
                     Ok(n) => {
                         outputs[idx].extend_from_slice(&readbuf[..n]);
-                        our_output.write_all(&readbuf[..n])?;
+                        if let Some(our_output) = our_output.as_mut() {
+                            our_output.write_all(&readbuf[..n])?;
+                        }
                     }
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                     Err(e) => return Err(e),
