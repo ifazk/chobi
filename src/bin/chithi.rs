@@ -732,6 +732,41 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         }
     }
 
+    /// similar to sync_full, but creates a clone
+    fn sync_clone(&self, source: &Fs, target: &Fs, snapshot: String) -> io::Result<()> {
+        // openzfs docs: If the destination is a clone, the source may be the
+        // origin snapshot, which must be fully specified (for example,
+        // pool/fs@origin, not just @origin).
+        let send_from = source.origin.as_deref().ok_or(io::Error::other(
+            "clone sync failed because source didn't have an origin",
+        ))?;
+        let send_from = (Some("-i"), send_from);
+        let send_to = format!("{}@{snapshot}", source.fs);
+        let send_to = Some(send_to.as_str());
+        let pv_size = self.get_send_size(send_from, send_to)?;
+        if self.args.no_stream {
+            info!(
+                "--no-stream selected; sending newest full snapshot {} to new clone target filesystem {target} (~ {})",
+                send_from.1,
+                ReadableBytes::from(pv_size)
+            );
+        } else {
+            info!(
+                "Sending oldest full snapshot {} to new clone target filesystem {target} (~ {})",
+                send_from.1,
+                ReadableBytes::from(pv_size)
+            );
+        }
+        match self.run_sync_cmd(source, send_from, send_to, target, pv_size) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // TODO this feels incorrect if the failure is because of a connection interruption
+                info!("clone creation failed, trying ordinary replication as fallback: {e}");
+                self.sync_full(source, target, snapshot)
+            }
+        }
+    }
+
     fn sync_full(&self, source: &Fs, target: &Fs, snapshot: String) -> io::Result<()> {
         let send_from = format!("{}@{snapshot}", source.fs);
         let pv_size = self.get_send_size((None, &send_from), None)?;
@@ -1136,26 +1171,38 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             (oldest_guid.clone(), oldest_creation.clone()),
         );
 
+        let mut target_created = false;
+
         // Finally do syncs
-        // If target does not exist, create it with inital full sync
-        if !target_exists {
+        // If target does not exist, create it with inital full sync, and get target snaps
+        let target_snaps = if !target_exists {
             if self.args.no_stream {
-                // TODO clone handling
                 debug!(
                     "target {target} does not exist, and --no-stream selected. Syncing newest snapshot for {source}"
                 );
                 // for --no-stream were done here
-                return self.sync_full(source, target, newest_sync_snapshot);
+                // TODO (but not cleanup)
+                if source.origin.is_some() && target.origin.is_some() {
+                    return self.sync_clone(source, target, newest_sync_snapshot);
+                } else {
+                    return self.sync_full(source, target, newest_sync_snapshot);
+                }
             }
             // Do initial sync from oldest snapshot, then do -I or -i to the newest
-            self.sync_full(source, target, oldest_snapshot.clone())?
-        }
-
-        let (_target_snaps, matching_snapshot_and_later) = {
-            let target_snaps = self
-                .get_snaps(target)?
+            if source.origin.is_some() && target.origin.is_some() {
+                self.sync_clone(source, target, oldest_snapshot.clone())?
+            } else {
+                self.sync_full(source, target, oldest_snapshot.clone())?
+            }
+            target_created = true;
+            HashMap::from([oldest_all.clone()])
+        } else {
+            self.get_snaps(target)?
                 .into_iter()
-                .collect::<HashMap<_, _>>();
+                .collect::<HashMap<_, _>>()
+        };
+
+        let (target_snaps, matching_snapshot_and_later) = {
             if self.args.dump_snaps {
                 for (snapshot, (guid, creation)) in &target_snaps {
                     info!(
@@ -1169,7 +1216,12 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 (target_snaps, matching_snap)
             } else {
                 // Size check target fs to see if it was accidentally created before sync
-                let target_size = self.get_zfs_value(target, &["-p", "used"])?;
+                let target_size = if self.args.dry_run {
+                    // target was created if it did not exist
+                    (64 * 1024 * 1024).to_string()
+                } else {
+                    self.get_zfs_value(target, &["-p", "used"])?
+                };
                 let target_size = target_size.parse::<u64>().map_err(|e| {
                     io::Error::other(format!("parsing target size failed with {e}"))
                 })?;
@@ -1210,6 +1262,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                     };
                     if self.args.no_stream {
                         // for --no-stream were done here
+                        // TODO (but not cleanup)
                         return self.sync_full(source, target, newest_sync_snapshot);
                     } else {
                         self.sync_full(source, target, oldest_snapshot.clone())?;
@@ -1238,6 +1291,9 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             }
         };
 
+        // TODO target_snaps is unused for now
+        let _ = target_snaps;
+
         if matching_snapshot_and_later.is_empty() {
             error!(
                 "internal error, matching snapshots list created from oldest snapshot, but has length 0"
@@ -1248,7 +1304,13 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         }
 
         if matching_snapshot_and_later.len() == 1 {
-            info!("the latest snapshot is already in target");
+            // message is not that meaningful if target was just created with the latest snapshot
+            if !target_created {
+                info!(
+                    "the latest snapshot {} for {source} is already in target {target}",
+                    matching_snapshot_and_later[0].0
+                );
+            }
             return Ok(());
         }
 
@@ -1336,23 +1398,36 @@ fn main() -> io::Result<()> {
                 "no source datasets found",
             ));
         }
-        // assume no clone handling for now
-        let targets = {
-            let mut targets = Vec::new();
-            for fs in &datasets {
-                let child_target = target.child_from_source(&source, fs)?;
-                targets.push(child_target)
-            }
-            // Do an early check for any busy children
-            if cmds.is_zfs_busy_for(&targets)? {
-                return Err(io::Error::new(
-                    io::ErrorKind::ResourceBusy,
-                    "one of the child datasets are in recv",
-                ));
-            }
-            targets
-        };
+        let mut targets = Vec::new();
+        // build targets
+        for fs in &datasets {
+            let child_target = target.child_from_source(&source, fs, args.clone_handling())?;
+            targets.push(child_target)
+        }
+        // Do an early check for any busy children
+        // I don't think syncoid does this and will start syncing parents and
+        // fail when syncing children. We want to be a bit more resiliant to
+        // cron or systemd starting serval instances of chithi on a timer.
+        if args.recv_check_start() && cmds.is_zfs_busy_for(&targets)? {
+            return Err(io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                "one of the child datasets are in recv",
+            ));
+        }
+        let mut deferred = Vec::new();
         for (fs, child_target) in datasets.iter().zip(targets.iter()) {
+            if args.clone_handling()
+                && child_target.origin.is_some()
+                && targets
+                    .iter()
+                    .any(|target| Some(target.fs.as_ref()) == child_target.origin_dataset())
+            {
+                deferred.push((fs, child_target));
+            } else {
+                cmds.sync_dataset(fs, child_target, false)?;
+            }
+        }
+        for (fs, child_target) in deferred {
             cmds.sync_dataset(fs, child_target, false)?;
         }
     }

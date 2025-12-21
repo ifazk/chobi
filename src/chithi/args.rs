@@ -105,6 +105,12 @@ pub struct Args {
     #[arg(long)]
     pub no_resume: bool,
 
+    /// Don't try to recreate clones on target. Clone handling is done by
+    /// deferring child datasets that are clones to a second pass of syncing, so
+    /// this flag is not meaningful without the --recursive flag.
+    #[arg(long, requires = "recursive")]
+    pub no_clone_handling: bool,
+
     /// Bypass the root check, for use with ZFS permission delegation
     #[arg(long)]
     pub no_privilege_elevation: bool,
@@ -121,9 +127,22 @@ pub struct Args {
     #[arg(long)]
     pub force_delete: bool,
 
+    /// Prevents the recursive recv check at the start of the sync
+    #[arg(long, requires = "recursive")]
+    pub no_recv_check_start: bool,
+
     pub source: String,
 
     pub target: String,
+}
+
+impl Args {
+    pub fn clone_handling(&self) -> bool {
+        !self.no_clone_handling
+    }
+    pub fn recv_check_start(&self) -> bool {
+        !self.no_recv_check_start
+    }
 }
 
 fn validate_identifier(value: &str) -> Result<String, &'static str> {

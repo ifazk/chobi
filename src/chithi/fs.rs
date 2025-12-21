@@ -49,8 +49,7 @@ pub struct Fs<'args> {
     pub host: Option<&'args str>,
     pub fs: Cow<'args, str>, // use owned for child datasets
     pub role: Role,
-    #[allow(unused)]
-    pub origin: Option<String>, // TODO clone handling
+    pub origin: Option<String>,
 }
 
 fn split_host_at_colon(host: &str) -> Option<(&str, &str)> {
@@ -108,7 +107,12 @@ impl<'args> Fs<'args> {
             origin: if origin == "-" { None } else { Some(origin) },
         }
     }
-    pub fn child_from_source(&self, source: &Self, child: &Self) -> io::Result<Self> {
+    pub fn child_from_source(
+        &self,
+        source: &Self,
+        child: &Self,
+        clone_handling: bool,
+    ) -> io::Result<Self> {
         let Some(dataset) = child.fs.strip_prefix(source.fs.as_ref()) else {
             return Err(io::Error::other(format!(
                 "child {child} did not start with source {source}"
@@ -116,19 +120,26 @@ impl<'args> Fs<'args> {
         };
         let mut target_dataset = self.fs.to_string();
         target_dataset.push_str(dataset);
-        let target_origin = child
-            .origin
-            .as_ref()
-            .and_then(|child_origin| child_origin.strip_prefix(source.fs.as_ref()))
-            .map(|target_origin_dataset_snapshot| {
-                let mut target_origin_full_snapshot = self.fs.to_string();
-                target_origin_full_snapshot.push_str(target_origin_dataset_snapshot);
-                target_origin_full_snapshot
-            });
-        Ok(self.new_child(
-            target_dataset,
-            target_origin.unwrap_or_else(|| "-".to_string()),
-        ))
+        let target_origin = clone_handling
+            .then(|| {
+                child
+                    .origin
+                    .as_ref()
+                    .and_then(|child_origin| child_origin.strip_prefix(source.fs.as_ref()))
+                    .map(|target_origin_dataset_snapshot| {
+                        let mut target_origin_full_snapshot = self.fs.to_string();
+                        target_origin_full_snapshot.push_str(target_origin_dataset_snapshot);
+                        target_origin_full_snapshot
+                    })
+            })
+            .flatten()
+            .unwrap_or_else(|| "-".to_string());
+        Ok(self.new_child(target_dataset, target_origin))
+    }
+    pub fn origin_dataset(&self) -> Option<&str> {
+        self.origin
+            .as_deref()
+            .and_then(|s| s.split_once('@').map(|split| split.0))
     }
 }
 

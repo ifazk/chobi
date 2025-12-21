@@ -13,7 +13,7 @@ build: check
 TEST_ARGS=
 
 test: check
-	RUST_LOG=debug cargo run --bin chithi -- ${TEST_ARGS}
+	cargo run --bin chithi -- ${TEST_ARGS}
 
 test_help: check
 	cargo run --bin chithi -- -h source target

@@ -12,16 +12,20 @@ some more escaping might be needed.
 ## Current feature deviations/shortcomings
 
 1. Chithi: I've decided not to handle clones when replicating datasets. Part of
-the reason is, I don't use clones myself. I haven't closed the door on clones,
-but for now we assume `--no-clone-handling`.
+   the reason is, I don't use clones myself. I haven't closed the door on
+   clones, but for now we assume `--no-clone-handling`.
 2. Chithi: For hostname checks for `syncoid:sync`, the machine's hostname must
-be less than 255 characters long.
+   be less than 255 characters long.
 3. Chithi: We only support platforms which have the `-t` option for zfs, i.e. we
-don't reimpelment the fallback snapshot fetching in syncoid. This means no
-solaris.
+   don't reimpelment the fallback snapshot fetching in syncoid. This means no
+   solaris.
 4. Chithi: We use the regex-lite crate for rexeg, and therefore do not support
-unicode case insensitivity or unicode character classes like `\p{Letter}`.
+   unicode case insensitivity or unicode character classes like `\p{Letter}`.
 5. Chithi: Not supporting insecure direct connection.
+6. Chithi: For recursive syncs, by default we do a recrursive recv check before
+   we start. This is to prevent multiple instances of chiti syncs for the same
+   source and target running at the same time. This can be turned off using the
+   `--no-recv-check-start` flag.
 
 # Why Rust? Why Not Go?
 There are no technical or social reasons why I'm choosing Rust. Go would have
@@ -42,7 +46,7 @@ release the binary for chithi if I finish the following features.
 
 ## Current TODOs for Chithi
 
-- Clone Handling
+- Restart-on-fail
 - Bookmark support
 - Bandwidth limits
 - Preserve properties
@@ -65,28 +69,3 @@ direction, or if the updates here are too slow.
 # Reporting issues
 This project is not accepting any issues. I plan on opening up issues once
 enough functionality is implemented.
-
-# Plans
-One of the main things I'm planning on is a deaemon for `chithi` for nightly
-pushes/pulls.
-
-I currently use systemd timers/services, but they can only have one argument (or
-you have to deal with some messy escaping and parsing).  So my current work flow
-looks like this:
-
-- Have default push/pull services that push/pull to/from a single remote pool.
-(e.g. syncoid-push-tank@.service syncoid-pull-tank@.service)
-
-- For each pair of pools that need to sync, add another set of services (e.g.
-syncoid-push-tank-rpool@.service syncoid-pull-tank-rpool@.service).
-
-- For datasets that need to be renamed when transfering, add yet another set of
-services (e.g.  syncoid-push-tank-rpool-dataset.service
-syncoid-pull-tank-rpool-dataset.service). The last one is extra relevant for
-proxmox, on the pull side `subvol-104-disk-0` is a meaningless name and likely to
-conflict with subvols of other servers.
-
-This works and I even backup all the syncoid*.{service,timer} files! And it
-works reall well because systemd is very robust! But every new non-default pool
-and ever new renaming gets tedius. I want a single configurating file where I
-put everything down.
