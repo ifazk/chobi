@@ -3,6 +3,7 @@ use crate::chithi::send_recv_opts::{OptionsLine, Opts};
 use bw::Bytes;
 use clap::Parser;
 use regex_lite::Regex;
+use std::num::NonZero;
 
 mod bw;
 
@@ -130,6 +131,10 @@ pub struct Args {
     /// Prevents the recursive recv check at the start of the sync
     #[arg(long, requires = "recursive")]
     pub no_recv_check_start: bool,
+
+    /// Adds a randomized delay before starting. Max 65535 seconds, just over 18 hours.
+    #[arg(long, value_name = "SECONDS")]
+    pub max_delay_seconds: Option<NonZero<u16>>,
 
     pub source: String,
 

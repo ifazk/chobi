@@ -397,7 +397,7 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Pipeline<'args, T> {
                     let mut arg = String::new();
                     write!(arg, "{}", Self::escape_cmd(inner)).expect("formatting should not fail");
                     for inner in &self.cmds[1..] {
-                        write!(arg, "| {}", Self::escape_cmd(inner))
+                        write!(arg, " | {}", Self::escape_cmd(inner))
                             .expect("formatting should not fail");
                     }
                     cmd.arg(arg);

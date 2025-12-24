@@ -21,12 +21,13 @@ use chobi::chithi::{Args, Cmd, CmdTarget, Fs, Pipeline, Role, get_is_roots, sys}
 use clap::Parser;
 use log::{debug, error, info, trace, warn};
 use regex_lite::Regex;
-use std::cell::LazyCell;
-use std::io::IsTerminal;
 use std::{
+    cell::LazyCell,
     collections::{HashMap, HashSet},
-    io::{self, BufRead, BufReader},
+    io::{self, BufRead, BufReader, IsTerminal},
     process::Stdio,
+    thread::sleep,
+    time::Duration,
 };
 
 const DOES_NOT_EXIST: &str = "dataset does not exist";
@@ -645,6 +646,8 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                     cmd.stderr(Stdio::inherit());
                     // ssh does not like it if stdio is not a terminal
                     cmd.stdin(Stdio::inherit())
+                } else if use_source_pv {
+                    cmd.stdin(Stdio::null()).stderr(Stdio::inherit())
                 } else {
                     cmd.stdin(Stdio::null()).stderr(Stdio::piped())
                 };
@@ -1349,6 +1352,13 @@ fn main() -> io::Result<()> {
         .format_timestamp(None)
         .format_target(false)
         .init();
+
+    if let Some(max_delay) = args.max_delay_seconds {
+        let max_delay = max_delay.get();
+        let delay_seconds = rand::random_range(0..max_delay);
+        info!("Delaying transfer for {delay_seconds} seconds");
+        sleep(Duration::from_secs(delay_seconds as u64));
+    }
 
     // Build fs
     let source = Fs::new(args.source_host.as_deref(), &args.source, Role::Source);

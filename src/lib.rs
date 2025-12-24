@@ -35,7 +35,7 @@ impl AutoKill {
 
 impl Drop for AutoKill {
     fn drop(&mut self) {
-        if self.inner.try_wait().is_ok() {
+        if self.inner.try_wait().as_ref().is_ok_and(Option::is_some) {
             return;
         }
         // issue kill and hope for the best and wait

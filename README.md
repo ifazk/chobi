@@ -27,6 +27,10 @@ some more escaping might be needed.
    source and target running at the same time. This can be turned off using the
    `--no-recv-check-start` flag.
 
+## Chithi features not found in syncoid 2.3
+1. Cli `--{source,target}-host`.
+2. Cli `--max-delay-seconds`.
+
 # Why Rust? Why Not Go?
 There are no technical or social reasons why I'm choosing Rust. Go would have
 been a better option, which I also have some experience with. But I just happen
@@ -51,6 +55,8 @@ release the binary for chithi if I finish the following features.
 - Bandwidth limits
 - Preserve properties
 - Check for ZFS resume feature before using it
+- Check for keystatus and encryption for non-raw sends
+- Check for target parent existing for --skip-parent
 - Compatibility flags
    + Use 'chithi:sync' but allow fallback to check for 'syncoid:sync'
    + Allow format flags for pruning both syncoid and chithi sync snaps
