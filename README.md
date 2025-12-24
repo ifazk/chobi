@@ -51,6 +51,7 @@ release the binary for chithi if I finish the following features.
 ## Current TODOs for Chithi
 
 - Restart-on-fail
+- Parallel/Concurrent sends
 - Bookmark support
 - Bandwidth limits
 - Preserve properties

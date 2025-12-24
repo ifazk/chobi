@@ -254,7 +254,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         let mut ps_process = ps_cmd.spawn()?;
 
         let ps_stdout = ps_process.stdout.take().expect("handle present");
-        let _ps_process = AutoKill::new(ps_process);
+        let mut ps_process = AutoKill::new(ps_process);
         let ps_stdout = BufReader::new(ps_stdout);
 
         // if in recv lines look like
@@ -265,9 +265,13 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 && self.zfs_recv.is_match(line_prefix)
             {
                 debug!("process {line} matches target {fs}");
+                ps_process.terminate();
+                ps_process.wait()?;
                 return Ok(true);
             }
         }
+
+        ps_process.wait()?;
 
         Ok(false)
     }
@@ -283,7 +287,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         let mut ps_process = ps_cmd.spawn()?;
 
         let ps_stdout = ps_process.stdout.take().expect("handle present");
-        let _ps_process = AutoKill::new(ps_process);
+        let mut ps_process = AutoKill::new(ps_process);
         let ps_stdout = BufReader::new(ps_stdout);
 
         // if in recv lines look like
@@ -295,10 +299,14 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                     && self.zfs_recv.is_match(line_prefix)
                 {
                     debug!("process {line} matches target {fs}");
+                    ps_process.terminate();
+                    ps_process.wait()?;
                     return Ok(true);
                 }
             }
         }
+
+        ps_process.wait()?;
 
         Ok(false)
     }
@@ -872,7 +880,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             .stdout
             .take()
             .expect("stdout for process is piped");
-        let _zfs_process = AutoKill::new(zfs_process);
+        let mut zfs_process = AutoKill::new(zfs_process);
         let zfs_stdout = BufReader::new(zfs_stdout);
         let zfs_lines = zfs_stdout.lines();
 
@@ -883,6 +891,8 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             let line = line?;
             let mut tsv = line.split('\t');
             let fs_at_snapshot = tsv.next().ok_or_else(|| {
+                zfs_process.terminate();
+                let _ = zfs_process.wait(); // were sending another io error, so ignore this one
                 io::Error::other("expected zfs get to return at least three fields")
             })?;
             let Some(snapshot) = fs_at_snapshot
@@ -898,9 +908,13 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 continue;
             };
             let property = tsv.next().ok_or_else(|| {
+                zfs_process.terminate();
+                let _ = zfs_process.wait(); // were sending another io error, so ignore this one
                 io::Error::other("expected zfs get to return at least three fields")
             })?;
             let value = tsv.next().ok_or_else(|| {
+                zfs_process.terminate();
+                let _ = zfs_process.wait(); // were sending another io error, so ignore this one
                 io::Error::other("expected zfs get to return at least three fields")
             })?;
             if property == "guid" {
@@ -924,6 +938,10 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 continue;
             };
         }
+
+        zfs_process.terminate();
+        zfs_process.wait()?;
+        std::mem::drop(zfs_process);
 
         let mut snapshots = Vec::new();
         for (snapshot, pair) in pre_snapshots {
