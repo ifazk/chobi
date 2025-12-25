@@ -1442,6 +1442,17 @@ fn main() -> io::Result<()> {
                 "one of the child datasets are in recv",
             ));
         }
+        // Check if the parent exists before starting trasfer
+        if args.skip_parent && !cmds.target_exists(&target)? {
+            error!(
+                "--skip-parent is set, but the target parent dataset does not exist. You may need to create {} manually",
+                target
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                "--skip-parent is set, but the target parent dataset does not exist",
+            ));
+        }
         let mut deferred = Vec::new();
         for (fs, child_target) in datasets.iter().zip(targets.iter()) {
             if args.clone_handling()

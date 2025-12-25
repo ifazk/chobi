@@ -27,8 +27,8 @@ pub fn wip() {
 
 /// Automatically reaps the child's pid when it goes out of scope
 /// It is better to call terminate and wait in happy paths, letting AutoKill
-/// terminate a program on it's own hangs for at least 10ms to allow enough time
-/// for the program to terminate before .
+/// terminate a program on its own hangs for at least 10ms to allow enough time
+/// for the program to terminate before sending SIGKILL.
 pub struct AutoKill {
     inner: std::process::Child,
     terminated: bool,

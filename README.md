@@ -57,7 +57,6 @@ release the binary for chithi if I finish the following features.
 - Preserve properties
 - Check for ZFS resume feature before using it
 - Check for keystatus and encryption for non-raw sends
-- Check for target parent existing for --skip-parent
 - Compatibility flags
    + Use 'chithi:sync' but allow fallback to check for 'syncoid:sync'
    + Allow format flags for pruning both syncoid and chithi sync snaps
