@@ -257,6 +257,14 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Cmd<'args, T> {
         } else {
             self.target.make_cmd(self.base)
         };
+        if self.target.is_remote() {
+            for &arg in self.args.as_ref() {
+                let escaped_arg = escape_str(arg);
+                let arg: &str = &escaped_arg;
+                cmd.arg(arg);
+            }
+            return cmd;
+        }
         for arg in self.args.as_ref() {
             cmd.arg(arg);
         }

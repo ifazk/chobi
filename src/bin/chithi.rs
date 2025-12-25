@@ -17,7 +17,7 @@
 use chobi::AutoTerminate;
 use chobi::chithi::sys::{get_syncoid_date, hostname, pipe_and_capture_stderr};
 use chobi::chithi::util::ReadableBytes;
-use chobi::chithi::zfs::{Creation, Snapshot, SnapshotInfo};
+use chobi::chithi::zfs::{Creation, IntermediateSource, Snapshot, SnapshotInfo};
 use chobi::chithi::{Args, Cmd, CmdTarget, Fs, Pipeline, Role, get_is_roots, sys};
 use clap::Parser;
 use log::{debug, error, info, trace, warn};
@@ -792,15 +792,17 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         &self,
         source: &Fs,
         target: &Fs,
-        from_snapshot: &str,
+        from_intermediate: IntermediateSource,
         to_snapshot: &str,
     ) -> io::Result<()> {
-        let send_from = (Some("-i"), from_snapshot);
+        let from_source = from_intermediate.source();
+        let send_from = (Some("-i"), from_source.as_str());
         let send_to = format!("{}@{to_snapshot}", source.fs);
         let send_to = Some(send_to.as_str());
         let pv_size = self.get_send_size(send_from, send_to)?;
         info!(
-            "Sending incremental intermediate snapshot {from_snapshot} .. {}@{to_snapshot} to new target filesystem {target} (~ {})",
+            "Sending incremental intermediate snapshot {} .. {}@{to_snapshot} to new target filesystem {target} (~ {})",
+            from_source,
             source.fs,
             ReadableBytes::from(pv_size)
         );
@@ -831,22 +833,44 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         &self,
         source: &Fs,
         target: &Fs,
-        snapshots: &[Snapshot<String>],
+        (intermediate_source, snapshots): (IntermediateSource, &[Snapshot<String>]),
     ) -> io::Result<()> {
         if !self.args.include_snaps.is_empty() || !self.args.exclude_snaps.is_empty() {
             info!(
                 "--no-stream is omitted but snaps are filtered. Simulating -I with filtered snaps"
             );
+            // should only be called with snapshots non-empty, but fail gracefully anyway
+            if let Some(snapshot) = snapshots.first() {
+                self.sync_intermidiate(source, target, intermediate_source, &snapshot.name)?;
+            };
             for snapshots in snapshots.windows(2) {
-                let from_snapshot = &snapshots[0].name;
+                let from_snapshot = IntermediateSource::Snapshot((&snapshots[0]).into());
                 let to_snapshot = &snapshots.last().expect("windows length 2").name;
                 self.sync_intermidiate(source, target, from_snapshot, to_snapshot)?
             }
             Ok(())
         } else {
-            let from_snapshot = &snapshots[0].name;
-            let to_snapshot = &snapshots.last().expect("length checked > 1").name;
-            self.sync_incremental(source, target, from_snapshot, to_snapshot)
+            match intermediate_source {
+                IntermediateSource::Snapshot(snapshot) => {
+                    let from_snapshot = snapshot.name;
+                    let to_snapshot = &snapshots.last().expect("non-empty checked").name;
+                    self.sync_incremental(source, target, from_snapshot, to_snapshot)
+                }
+                from_bookmark @ IntermediateSource::Bookmark(_) => {
+                    let next_snapshot = snapshots.first().expect("non-empty checked");
+                    self.sync_intermidiate(source, target, from_bookmark, &next_snapshot.name)?;
+                    if snapshots.len() > 1 {
+                        let last_snapshot = snapshots.last().expect("non-empty checked");
+                        self.sync_incremental(
+                            source,
+                            target,
+                            &next_snapshot.name,
+                            &last_snapshot.name,
+                        )?
+                    };
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -932,6 +956,128 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
         // We're done with the process, so drop it
         std::mem::drop(zfs_process);
+
+        let mut snapshots = Vec::new();
+        for (snapshot, pair) in pre_snapshots {
+            let Some((guid, creation)) = pair.0.zip(pair.1) else {
+                // This should not happen if zfs on the source behaves correctly
+                return Err(io::Error::other(format!(
+                    "didn't get both guid and creation for {snapshot}"
+                )));
+            };
+            let snapshot = Snapshot::new(snapshot, guid, creation);
+            // We do this check here so that we don't need to keep checking
+            if self.snap_is_included(&snapshot.name) {
+                snapshots.push(snapshot);
+            }
+        }
+
+        snapshots.sort_by(
+            |Snapshot {
+                 name: name_x,
+                 guid: _,
+                 creation: creation_x,
+             },
+             Snapshot {
+                 name: name_y,
+                 guid: _,
+                 creation: creation_y,
+             }| {
+                if creation_x.eq(creation_y) {
+                    name_x.cmp(name_y)
+                } else {
+                    creation_x.cmp(creation_y)
+                }
+            },
+        );
+
+        Ok(snapshots)
+    }
+
+    // This is annoying but we have to duplicate most of the get_snaps code for
+    // bookmarks. Syncoid does this, and so will we. The reason for this is the
+    // error handling is different between the two cases. Some of the code can
+    // be abstracted to share, but at this point I don't see the point.
+    /// Throws empty vector when bookmarks feature is not available
+    fn get_bookmarks(&self, fs: &Fs) -> io::Result<Vec<Snapshot<String>>> {
+        let mut zfs = self.pick_zfs(fs.role).to_mut();
+        zfs.args([
+            "get",
+            "-Hpd",
+            "1",
+            "-t",
+            "bookmark",
+            "guid,creation",
+            &fs.fs,
+        ]);
+        debug!("getting list of bookmarks on {fs} using {zfs}",);
+        let mut zfs = zfs.to_cmd();
+        zfs.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let zfs_output = zfs.output()?;
+
+        // Error checking
+        // Syncoid checks only the first line, unsure if that matters
+        let zfs_stderr = String::from_utf8_lossy(&zfs_output.stderr);
+        let zfs_err_first = zfs_stderr.lines().next().unwrap_or_default();
+        if zfs_err_first.contains("invalid type")
+            || zfs_err_first.contains("operation not applicable to datasets of this type")
+        {
+            return Ok(Vec::new());
+        };
+
+        // the output will have guids and creation on separate lines
+        let zfs_stdout = String::from_utf8_lossy(&zfs_output.stdout);
+        let zfs_lines = zfs_stdout.lines();
+
+        let mut pre_snapshots = HashMap::new();
+        let mut creation_counter = 0usize;
+
+        for line in zfs_lines {
+            let mut tsv = line.split('\t');
+            let fs_pound_bookmark = tsv.next().ok_or_else(|| {
+                io::Error::other("expected zfs get to return at least three fields")
+            })?;
+            let Some(bookmark) = fs_pound_bookmark
+                .strip_prefix(fs.fs.as_ref())
+                .and_then(|pound_bookmark| pound_bookmark.strip_prefix('#'))
+                .map(|bookmark: &str| bookmark.to_string())
+            else {
+                // skip anything that is not the specified fs
+                warn!(
+                    "getting bookmarks for {fs} got filesystem bookmark {fs_pound_bookmark} which is not of the form {}#BOOKMARK",
+                    fs.fs
+                );
+                continue;
+            };
+            let property = tsv.next().ok_or_else(|| {
+                io::Error::other("expected zfs get to return at least three fields")
+            })?;
+            let value = tsv.next().ok_or_else(|| {
+                io::Error::other("expected zfs get to return at least three fields")
+            })?;
+            if property == "guid" {
+                let mapped_value = pre_snapshots.entry(bookmark).or_insert((None, None));
+                mapped_value.0 = Some(value.to_string());
+            } else if property == "creation" {
+                // creation times are accurate to a second, but snapshots in the
+                // same second are highly likely. The list command output is
+                // ordered, so we add a running number to the creation timestamp
+                // and make sure they are ordered correctly.
+                let mapped_value = pre_snapshots.entry(bookmark).or_insert((None, None));
+                let Some(creation) = Creation::new(value, creation_counter) else {
+                    warn!("could not parse creation value {value} for {fs}");
+                    continue;
+                };
+                mapped_value.1 = Some(creation);
+                creation_counter += 1;
+            } else {
+                // skip anything that is not guid/creation
+                warn!("getting bookmarks for {fs} got property which is not one of guid,creation");
+                continue;
+            };
+        }
 
         let mut snapshots = Vec::new();
         for (snapshot, pair) in pre_snapshots {
@@ -1056,20 +1202,55 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         }
     }
 
-    // The output is guaranteed to be non-empty if is_some
     fn get_matching_snapshot<'a>(
         &self,
         sorted_source_snaps: &'a [Snapshot<String>],
         target_snaps: &HashMap<&str, SnapshotInfo<&str>>,
-    ) -> Option<&'a [Snapshot<String>]> {
+    ) -> Option<(IntermediateSource<'a>, &'a [Snapshot<String>])> {
         for (idx, source_snap) in sorted_source_snaps.iter().enumerate().rev() {
             if let Some(target_snap) = target_snaps.get(source_snap.name.as_str())
                 && source_snap.guid == target_snap.guid
             {
-                return Some(&sorted_source_snaps[idx..]);
+                let match_t = (&sorted_source_snaps[idx]).into();
+                let next = idx + 1;
+                let rest = &sorted_source_snaps[next..];
+                return Some((IntermediateSource::Snapshot(match_t), rest));
             }
         }
         None
+    }
+
+    fn get_matching_bookmark<'b, 'c>(
+        &self,
+        sorted_target_snaps: &[Snapshot<String>],
+        sorted_source_bookmarks: &'b [Snapshot<String>],
+        sorted_source_snaps: &'c [Snapshot<String>],
+    ) -> Option<(IntermediateSource<'b>, &'c [Snapshot<String>])> {
+        let bookmark_guids = sorted_source_bookmarks
+            .iter()
+            .map(|bookmark| bookmark.guid.as_str())
+            .collect::<HashSet<_>>();
+        let target_snap = sorted_target_snaps
+            .iter()
+            .rfind(|target_snap| bookmark_guids.contains(target_snap.guid.as_str()))?;
+        let bookmark = sorted_source_bookmarks
+            .iter()
+            .rfind(|source_bookmark| source_bookmark.guid == target_snap.guid)
+            .expect("guid was taken from bookmarks_guid");
+        // technically can replace this linear search with a binary
+        let source_snaps_later = sorted_source_snaps
+            .iter()
+            .enumerate()
+            .find_map(|(idx, snap)| {
+                (snap.creation.creation > bookmark.creation.creation).then_some(idx)
+            })
+            .map_or(&sorted_source_snaps[0..0], |idx| {
+                &sorted_source_snaps[idx..]
+            });
+        Some((
+            IntermediateSource::Bookmark(bookmark.into()),
+            source_snaps_later,
+        ))
     }
 
     // skip_sync_snapshot is set to true for these senarios
@@ -1214,19 +1395,25 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         } else {
             self.get_snaps(target)?
         };
-        let target_snaps_map = target_snaps_list
-            .iter()
-            .map(|snapshot| (snapshot.name.as_str(), snapshot.into()))
-            .collect::<HashMap<_, _>>();
-
-        //let mut bookmark = None;
-        //let mut next_snapshot = None;
+        let target_snaps_map = Snapshot::list_to_map(&target_snaps_list);
+        let source_bookmarks_maybe;
 
         let matching_snapshot_and_later = {
             self.dump_snaps_maybe(target, &target_snaps_list);
             let matching_snap = self.get_matching_snapshot(&source_snaps, &target_snaps_map);
-            // TODO bookmark fallback to oldest snapshot
-            if let Some(matching_snap) = matching_snap {
+            let bookmark = if matching_snap.is_none() {
+                let source_bookmarks = self.get_bookmarks(source)?;
+                self.dump_snaps_maybe(source, &source_bookmarks);
+                source_bookmarks_maybe = Some(source_bookmarks);
+                self.get_matching_bookmark(
+                    &target_snaps_list,
+                    source_bookmarks_maybe.as_ref().expect("set to some above"),
+                    &source_snaps,
+                )
+            } else {
+                None
+            };
+            if let Some(matching_snap) = matching_snap.or(bookmark) {
                 matching_snap
             } else {
                 // Size check target fs to see if it was accidentally created before sync
@@ -1306,36 +1493,28 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             }
         };
 
-        if matching_snapshot_and_later.is_empty() {
-            error!(
-                "internal error, matching snapshots list created from oldest snapshot, but has length 0"
-            );
-            return Err(io::Error::other(
-                "matching snapshots list created from oldest snapshot, but has length 0",
-            ));
-        }
-
-        if matching_snapshot_and_later.len() == 1 {
+        if matching_snapshot_and_later.1.is_empty() {
             // message is not that meaningful if target was just created with the latest snapshot
             if !target_created {
                 info!(
-                    "the latest snapshot {} for {source} is already in target {target}",
-                    matching_snapshot_and_later[0].name
+                    "no snapshots newer than {} in {source}. Target {target} up to date, nothing to do, not syncing.",
+                    matching_snapshot_and_later.0.source()
                 );
             }
             return Ok(());
         }
 
-        // If we got this far, target exists now and has matching snapshot of length > 1
+        // If we got this far, target exists now and has matching snapshot
         if self.args.no_stream {
             // for --no-stream we do a single -i stream to newest and finish
             self.sync_intermidiate(
                 source,
                 target,
-                &matching_snapshot_and_later[0].name,
+                matching_snapshot_and_later.0,
                 &matching_snapshot_and_later
+                    .1
                     .last()
-                    .expect("length checked > 1")
+                    .expect("non-empty checked")
                     .name,
             )
         } else {

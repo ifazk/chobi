@@ -65,6 +65,7 @@ release the binary for chithi if I finish the following features.
   + Manage bookmarks
   + Manage sync snaps
   + Manage target snapshots
+  + Manage ssh master
 
 # Contributing
 I am not accepting PRs or contributions to the project. The project isn't ready

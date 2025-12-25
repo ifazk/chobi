@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Creation {
-    creation: u64,
+    pub creation: u64,
     idx: usize,
 }
 
@@ -20,6 +22,7 @@ impl std::fmt::Display for Creation {
     }
 }
 
+/// A type that represents a snapshot or bookmark.
 /// We abstract over the type, but in reality T is either String or &str
 pub struct Snapshot<T> {
     pub name: T,
@@ -47,6 +50,11 @@ impl Snapshot<String> {
             creation: Creation::fake_new(FAKE_NEW_SYNC_CREATION, 0),
         }
     }
+    pub fn list_to_map(list: &[Self]) -> HashMap<&str, SnapshotInfo<&str>> {
+        list.iter()
+            .map(|snapshot| (snapshot.name.as_str(), snapshot.into()))
+            .collect::<HashMap<_, _>>()
+    }
 }
 
 impl<'a> From<&'a Snapshot<String>> for Snapshot<&'a str> {
@@ -65,6 +73,26 @@ impl<'a, 'b> From<&'a Snapshot<&'b str>> for Snapshot<String> {
             name: value.name.to_string(),
             guid: value.guid.to_string(),
             creation: value.creation,
+        }
+    }
+}
+
+pub enum IntermediateSource<'a> {
+    Snapshot(Snapshot<&'a str>),
+    Bookmark(Snapshot<&'a str>),
+}
+
+impl<'a> IntermediateSource<'a> {
+    pub fn source(&self) -> String {
+        match self {
+            IntermediateSource::Snapshot(snapshot) => format!("@{}", snapshot.name),
+            IntermediateSource::Bookmark(snapshot) => format!("#{}", snapshot.name),
+        }
+    }
+    pub fn kind(&self) -> &'static str {
+        match self {
+            IntermediateSource::Snapshot(_) => "snapshot",
+            IntermediateSource::Bookmark(_) => "bookmark",
         }
     }
 }
