@@ -24,6 +24,7 @@ mod fs;
 pub mod send_recv_opts;
 pub mod sys;
 pub mod util;
+pub mod zfs;
 
 pub use args::Args;
 pub use cmd::Cmd;

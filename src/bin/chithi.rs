@@ -17,6 +17,7 @@
 use chobi::AutoTerminate;
 use chobi::chithi::sys::{get_syncoid_date, hostname, pipe_and_capture_stderr};
 use chobi::chithi::util::ReadableBytes;
+use chobi::chithi::zfs::{Creation, Snapshot, SnapshotInfo};
 use chobi::chithi::{Args, Cmd, CmdTarget, Fs, Pipeline, Role, get_is_roots, sys};
 use clap::Parser;
 use log::{debug, error, info, trace, warn};
@@ -736,7 +737,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
     }
 
     /// similar to sync_full, but creates a clone
-    fn sync_clone(&self, source: &Fs, target: &Fs, snapshot: String) -> io::Result<()> {
+    fn sync_clone(&self, source: &Fs, target: &Fs, snapshot: &str) -> io::Result<()> {
         // openzfs docs: If the destination is a clone, the source may be the
         // origin snapshot, which must be fully specified (for example,
         // pool/fs@origin, not just @origin).
@@ -770,7 +771,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         }
     }
 
-    fn sync_full(&self, source: &Fs, target: &Fs, snapshot: String) -> io::Result<()> {
+    fn sync_full(&self, source: &Fs, target: &Fs, snapshot: &str) -> io::Result<()> {
         let send_from = format!("{}@{snapshot}", source.fs);
         let pv_size = self.get_send_size((None, &send_from), None)?;
         if self.args.no_stream {
@@ -830,26 +831,26 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         &self,
         source: &Fs,
         target: &Fs,
-        snapshots: &[(String, (String, String))],
+        snapshots: &[Snapshot<String>],
     ) -> io::Result<()> {
         if !self.args.include_snaps.is_empty() || !self.args.exclude_snaps.is_empty() {
             info!(
                 "--no-stream is omitted but snaps are filtered. Simulating -I with filtered snaps"
             );
             for snapshots in snapshots.windows(2) {
-                let from_snapshot = &snapshots[0].0;
-                let to_snapshot = &snapshots.last().expect("windows length 2").0;
+                let from_snapshot = &snapshots[0].name;
+                let to_snapshot = &snapshots.last().expect("windows length 2").name;
                 self.sync_intermidiate(source, target, from_snapshot, to_snapshot)?
             }
             Ok(())
         } else {
-            let from_snapshot = &snapshots[0].0;
-            let to_snapshot = &snapshots.last().expect("length checked > 1").0;
+            let from_snapshot = &snapshots[0].name;
+            let to_snapshot = &snapshots.last().expect("length checked > 1").name;
             self.sync_incremental(source, target, from_snapshot, to_snapshot)
         }
     }
 
-    fn get_snaps(&self, fs: &Fs) -> io::Result<Vec<(String, (String, String))>> {
+    fn get_snaps(&self, fs: &Fs) -> io::Result<Vec<Snapshot<String>>> {
         let mut zfs = self.pick_zfs(fs.role).to_mut();
         zfs.args([
             "get",
@@ -916,7 +917,11 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 // TODO: check if this messes with anything or do we really need
                 // things orderered from 0
                 let mapped_value = pre_snapshots.entry(snapshot).or_insert((None, None));
-                mapped_value.1 = Some(format!("{value}{creation_counter:03}"));
+                let Some(creation) = Creation::new(value, creation_counter) else {
+                    warn!("could not parse creation value {value} for {fs}");
+                    continue;
+                };
+                mapped_value.1 = Some(creation);
                 creation_counter += 1;
             } else {
                 // skip anything that is not guid/creation
@@ -930,22 +935,32 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
         let mut snapshots = Vec::new();
         for (snapshot, pair) in pre_snapshots {
-            let Some(guid_creation) = pair.0.zip(pair.1) else {
+            let Some((guid, creation)) = pair.0.zip(pair.1) else {
                 // This should not happen if zfs on the source behaves correctly
                 return Err(io::Error::other(format!(
                     "didn't get both guid and creation for {snapshot}"
                 )));
             };
+            let snapshot = Snapshot::new(snapshot, guid, creation);
             // We do this check here so that we don't need to keep checking
-            if self.snap_is_included(&snapshot) {
-                snapshots.push((snapshot, guid_creation));
+            if self.snap_is_included(&snapshot.name) {
+                snapshots.push(snapshot);
             }
         }
 
         snapshots.sort_by(
-            |(snapshot_x, (_, creation_x)), (snapshot_y, (_, creation_y))| {
+            |Snapshot {
+                 name: name_x,
+                 guid: _,
+                 creation: creation_x,
+             },
+             Snapshot {
+                 name: name_y,
+                 guid: _,
+                 creation: creation_y,
+             }| {
                 if creation_x.eq(creation_y) {
-                    snapshot_x.cmp(snapshot_y)
+                    name_x.cmp(name_y)
                 } else {
                     creation_x.cmp(creation_y)
                 }
@@ -953,6 +968,21 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         );
 
         Ok(snapshots)
+    }
+
+    fn dump_snaps_maybe<T: std::fmt::Display>(&self, source_or_target: &Fs, snaps: &[Snapshot<T>]) {
+        if self.args.dump_snaps {
+            for Snapshot {
+                name,
+                guid,
+                creation,
+            } in snaps
+            {
+                info!(
+                    "got snapshot {name} with guid:{guid} creation:{creation} for {source_or_target}"
+                )
+            }
+        }
     }
 
     fn snap_is_included(&self, snap_name: &str) -> bool {
@@ -1007,25 +1037,20 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
     fn oldest_sync_snap<'a>(
         &self,
-        source_snaps: &'a [(String, (String, String))],
-    ) -> Option<(&'a String, &'a String, &'a String)> {
+        source_snaps: &'a [Snapshot<String>],
+    ) -> Option<Snapshot<&'a str>> {
         let len = source_snaps.len();
         if len > 0 {
-            source_snaps
-                .first()
-                .map(|(snapshot, (guid, creation))| (snapshot, guid, creation))
+            source_snaps.first().map(|snapshot| snapshot.into())
         } else {
             None
         }
     }
 
-    fn newest_sync_snap<'a>(
-        &self,
-        source_snaps: &'a [(String, (String, String))],
-    ) -> Option<&'a String> {
+    fn newest_sync_snap<'a>(&self, source_snaps: &'a [Snapshot<String>]) -> Option<&'a String> {
         let len = source_snaps.len();
         if len > 0 {
-            source_snaps.get(len - 1).map(|(snapshot, _)| snapshot)
+            source_snaps.get(len - 1).map(|snapshot| &snapshot.name)
         } else {
             None
         }
@@ -1034,12 +1059,12 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
     // The output is guaranteed to be non-empty if is_some
     fn get_matching_snapshot<'a>(
         &self,
-        sorted_source_snaps: &'a [(String, (String, String))],
-        target_snaps: &HashMap<String, (String, String)>,
-    ) -> Option<&'a [(String, (String, String))]> {
-        for (idx, (source_snap, (guid, _))) in sorted_source_snaps.iter().enumerate().rev() {
-            if let Some((target_guid, _)) = target_snaps.get(source_snap)
-                && guid == target_guid
+        sorted_source_snaps: &'a [Snapshot<String>],
+        target_snaps: &HashMap<&str, SnapshotInfo<&str>>,
+    ) -> Option<&'a [Snapshot<String>]> {
+        for (idx, source_snap) in sorted_source_snaps.iter().enumerate().rev() {
+            if let Some(target_snap) = target_snaps.get(source_snap.name.as_str())
+                && source_snap.guid == target_snap.guid
             {
                 return Some(&sorted_source_snaps[idx..]);
             }
@@ -1126,25 +1151,13 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
         let mut source_snaps = self.get_snaps(source)?;
 
-        if self.args.dump_snaps {
-            for (snapshot, (guid, creation)) in source_snaps.iter() {
-                info!("got snapshot {snapshot} with guid:{guid} creation:{creation} for {source}")
-            }
-        }
+        self.dump_snaps_maybe(source, &source_snaps);
 
         let newest_sync_snapshot = if !self.args.no_sync_snap && !skip_sync_snapshot {
             let new_sync_snap = self.new_sync_snap(source)?;
             if let Some(new_snap_name) = new_sync_snap {
                 // before returning, update source snaps
-                const FAKE_NEW_SYNC_GUID: &str = "9999999999999999999";
-                const FAKE_NEW_SYNC_CREATION: &str = "9999999999000";
-                source_snaps.push((
-                    new_snap_name.clone(),
-                    (
-                        FAKE_NEW_SYNC_GUID.to_string(),
-                        FAKE_NEW_SYNC_CREATION.to_string(),
-                    ),
-                ));
+                source_snaps.push(Snapshot::fake_newest(new_snap_name.clone()));
                 new_snap_name
             } else {
                 let Some(newest_snapshot) = self.newest_sync_snap(&source_snaps).cloned() else {
@@ -1164,9 +1177,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             newest_snapshot
         };
 
-        let Some((oldest_snapshot, oldest_guid, oldest_creation)) =
-            self.oldest_sync_snap(&source_snaps)
-        else {
+        let Some(oldest_snapshot) = self.oldest_sync_snap(&source_snaps) else {
             // This should be dead code since getting newest_sync_snapshot
             // should have errored, but keeping it here defensively
             const NO_SNAP: &str =
@@ -1174,16 +1185,12 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             debug!("{}", NO_SNAP);
             return Err(io::Error::other(NO_SNAP));
         };
-        let oldest_all = (
-            oldest_snapshot.to_string(),
-            (oldest_guid.clone(), oldest_creation.clone()),
-        );
 
         let mut target_created = false;
 
         // Finally do syncs
         // If target does not exist, create it with inital full sync, and get target snaps
-        let target_snaps = if !target_exists {
+        let target_snaps_list = if !target_exists {
             if self.args.no_stream {
                 debug!(
                     "target {target} does not exist, and --no-stream selected. Syncing newest snapshot for {source}"
@@ -1191,37 +1198,36 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 // for --no-stream were done here
                 // TODO (but not cleanup)
                 if source.origin.is_some() && target.origin.is_some() {
-                    return self.sync_clone(source, target, newest_sync_snapshot);
+                    return self.sync_clone(source, target, &newest_sync_snapshot);
                 } else {
-                    return self.sync_full(source, target, newest_sync_snapshot);
+                    return self.sync_full(source, target, &newest_sync_snapshot);
                 }
             }
             // Do initial sync from oldest snapshot, then do -I or -i to the newest
             if source.origin.is_some() && target.origin.is_some() {
-                self.sync_clone(source, target, oldest_snapshot.clone())?
+                self.sync_clone(source, target, oldest_snapshot.name)?
             } else {
-                self.sync_full(source, target, oldest_snapshot.clone())?
+                self.sync_full(source, target, oldest_snapshot.name)?
             }
             target_created = true;
-            HashMap::from([oldest_all.clone()])
+            vec![(&oldest_snapshot).into()]
         } else {
             self.get_snaps(target)?
-                .into_iter()
-                .collect::<HashMap<_, _>>()
         };
+        let target_snaps_map = target_snaps_list
+            .iter()
+            .map(|snapshot| (snapshot.name.as_str(), snapshot.into()))
+            .collect::<HashMap<_, _>>();
 
-        let (target_snaps, matching_snapshot_and_later) = {
-            if self.args.dump_snaps {
-                for (snapshot, (guid, creation)) in &target_snaps {
-                    info!(
-                        "got snapshot {snapshot} with guid:{guid} creation:{creation} for {target}"
-                    )
-                }
-            };
-            let matching_snap = self.get_matching_snapshot(&source_snaps, &target_snaps);
+        //let mut bookmark = None;
+        //let mut next_snapshot = None;
+
+        let matching_snapshot_and_later = {
+            self.dump_snaps_maybe(target, &target_snaps_list);
+            let matching_snap = self.get_matching_snapshot(&source_snaps, &target_snaps_map);
             // TODO bookmark fallback to oldest snapshot
             if let Some(matching_snap) = matching_snap {
-                (target_snaps, matching_snap)
+                matching_snap
             } else {
                 // Size check target fs to see if it was accidentally created before sync
                 let target_size = if self.args.dry_run {
@@ -1271,10 +1277,11 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                     if self.args.no_stream {
                         // for --no-stream were done here
                         // TODO (but not cleanup)
-                        return self.sync_full(source, target, newest_sync_snapshot);
+                        return self.sync_full(source, target, &newest_sync_snapshot);
                     } else {
-                        self.sync_full(source, target, oldest_snapshot.clone())?;
-                        let target_snaps = HashMap::from([oldest_all]);
+                        self.sync_full(source, target, oldest_snapshot.name)?;
+                        let target_snaps =
+                            HashMap::from([(oldest_snapshot.name, oldest_snapshot.into())]);
                         let Some(matching_snapshots) =
                             self.get_matching_snapshot(&source_snaps, &target_snaps)
                         else {
@@ -1285,7 +1292,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                                 "building matching snapshots from oldest failed",
                             ));
                         };
-                        (target_snaps, matching_snapshots)
+                        matching_snapshots
                     }
                 } else {
                     error!(
@@ -1298,9 +1305,6 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 }
             }
         };
-
-        // TODO target_snaps is unused for now
-        let _ = target_snaps;
 
         if matching_snapshot_and_later.is_empty() {
             error!(
@@ -1316,7 +1320,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             if !target_created {
                 info!(
                     "the latest snapshot {} for {source} is already in target {target}",
-                    matching_snapshot_and_later[0].0
+                    matching_snapshot_and_later[0].name
                 );
             }
             return Ok(());
@@ -1328,11 +1332,11 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             self.sync_intermidiate(
                 source,
                 target,
-                &matching_snapshot_and_later[0].0,
+                &matching_snapshot_and_later[0].name,
                 &matching_snapshot_and_later
                     .last()
                     .expect("length checked > 1")
-                    .0,
+                    .name,
             )
         } else {
             self.sync_incremental_or_fallback(source, target, matching_snapshot_and_later)

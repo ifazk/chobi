@@ -98,7 +98,9 @@ pub struct Args {
     #[arg(long)]
     pub no_command_checks: bool,
 
-    /// Do a dry run, without modifying datasets and pools
+    /// Do a dry run, without modifying datasets and pools. The dry run
+    /// functionality is provided on a best effort basis and may break between
+    /// minor versions.
     #[arg(long)]
     pub dry_run: bool,
 
