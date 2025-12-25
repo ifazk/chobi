@@ -15,8 +15,6 @@
 //  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::process::exit;
-use std::thread::sleep;
-use std::time::Duration;
 
 pub mod chithi;
 
@@ -26,37 +24,23 @@ pub fn wip() {
 }
 
 /// Automatically reaps the child's pid when it goes out of scope
-/// It is better to call terminate and wait in happy paths, letting AutoKill
-/// terminate a program on its own hangs for at least 10ms to allow enough time
-/// for the program to terminate before sending SIGKILL.
-pub struct AutoKill {
+pub struct AutoTerminate {
     inner: std::process::Child,
-    terminated: bool,
 }
 
-impl AutoKill {
+impl AutoTerminate {
     pub fn new(child: std::process::Child) -> Self {
-        Self {
-            inner: child,
-            terminated: false,
-        }
+        Self { inner: child }
     }
     /// Terminate the program, if it hasn't been done already.
     /// Should not be called if there's reason to believe that the program has
     /// terminated already (e.g. it closed it's output file descriptor), and
     /// wait() should be called directly instead.
-    pub fn terminate(&mut self) {
-        if self.terminated {
-            return;
-        }
-        self.terminated = true;
-        if !self.is_reaped() {
-            let pid = self.pid();
-            let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
-        }
+    fn terminate(&mut self) {
+        let pid = self.pid();
+        let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
     }
-    pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.terminated = true;
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         self.inner.wait()
     }
     fn is_reaped(&mut self) -> bool {
@@ -67,20 +51,16 @@ impl AutoKill {
     }
 }
 
-impl Drop for AutoKill {
+impl Drop for AutoTerminate {
     fn drop(&mut self) {
         if self.is_reaped() {
             return;
         }
         // try terminate
         self.terminate();
-        // give the process some time to terminate, anything else gets too fancy with separate code for FreeBSD and Linux
-        sleep(Duration::from_millis(10));
-        if self.is_reaped() {
-            return;
-        }
-        // issue kill and hope for the best and wait
-        let _ = self.inner.kill();
-        let _ = self.inner.wait();
+        // This won't be an interrupt because wait() loops on interrupts, and we
+        // shouldn't really have any other permission issues, etc. So the result
+        // should be okay to ignore.
+        let _ = self.wait();
     }
 }
