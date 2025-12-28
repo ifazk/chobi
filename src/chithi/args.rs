@@ -1,9 +1,25 @@
+//  Chobi and Chithi: Managment tools for ZFS snapshot, send, and recv
+//  Copyright (C) 2025  Ifaz Kabir
+
+//  This program is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+
+//  This program is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+
+//  You should have received a copy of the GNU General Public License
+//  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 use crate::chithi::compress::Compress;
 use crate::chithi::send_recv_opts::{OptionsLine, Opts};
 use bw::Bytes;
 use clap::Parser;
 use regex_lite::Regex;
-use std::num::NonZero;
+use std::{collections::HashSet, num::NonZero};
 
 mod bw;
 
@@ -19,7 +35,7 @@ pub struct Args {
 
     /// Extra identifier which is included in the snapshot name. Can be used for
     /// replicating to multiple targets.
-    #[arg(long, value_name = "EXTRA", value_parser = validate_identifier)]
+    #[arg(long, value_name = "EXTRA", value_parser = Args::validate_identifier)]
     pub identifier: Option<String>,
 
     /// Also transfers child datasets
@@ -98,6 +114,12 @@ pub struct Args {
     #[arg(long)]
     pub no_command_checks: bool,
 
+    /// A comma separated list of optional commands to skip. Current values are:
+    /// sourcepv localpv targetpv compress localcompress sourcembuffer
+    /// targetmbuffer localmbuffer
+    #[arg(long, value_parser = Args::get_commands_to_skip, default_value = "")]
+    pub skip_optional_commands: HashSet<&'static str>,
+
     /// Do a dry run, without modifying datasets and pools. The dry run
     /// functionality is provided on a best effort basis and may break between
     /// minor versions.
@@ -150,15 +172,85 @@ impl Args {
     pub fn recv_check_start(&self) -> bool {
         !self.no_recv_check_start
     }
-}
-
-fn validate_identifier(value: &str) -> Result<String, &'static str> {
-    fn invalid_char(c: char) -> bool {
-        !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':' || c == '.')
+    /// Fills in the optional_commands_to_skip field
+    fn get_commands_to_skip(commands: &str) -> Result<HashSet<&'static str>, String> {
+        let mut res = HashSet::new();
+        let commands = commands.trim();
+        if commands.is_empty() {
+            return Ok(res);
+        }
+        for command in commands.split(',') {
+            match command {
+                "sourcepv" => {
+                    res.insert("sourcepv");
+                }
+                "targetpv" => {
+                    res.insert("targetpv");
+                }
+                "localpv" => {
+                    res.insert("localpv");
+                }
+                "compress" => {
+                    res.insert("compress");
+                }
+                "localcompress" => {
+                    res.insert("localcompress");
+                }
+                "sourcembuffer" => {
+                    res.insert("sourcembuffer");
+                }
+                "targetmbuffer" => {
+                    res.insert("targetmbuffer");
+                }
+                "localmbuffer" => {
+                    res.insert("localmbuffer");
+                }
+                s => {
+                    return Err(format!(
+                        "unsupported command {s} passed to --skip-optional-commands"
+                    ));
+                }
+            }
+        }
+        Ok(res)
     }
-    if value.contains(invalid_char) {
-        Err("extra indentifier contains invalid chars!")
-    } else {
-        Ok(value.to_string())
+
+    pub fn optional_enabled(&self, optional: &'static str) -> bool {
+        !self.skip_optional_commands.contains(optional)
+    }
+
+    pub fn get_source_mbuffer_args(&self) -> Vec<&str> {
+        let mut args = vec!["-q", "-s", "128k", "-m", self.mbuffer_size.as_str()];
+        if let Some(limit) = &self.source_bwlimit {
+            args.push("-R");
+            args.push(&limit.str);
+        }
+        args
+    }
+
+    pub fn get_target_mbuffer_args(&self) -> Vec<&str> {
+        let mut args = vec!["-q", "-s", "128k", "-m", self.mbuffer_size.as_str()];
+        if let Some(limit) = &self.target_bwlimit {
+            args.push("-r");
+            args.push(&limit.str);
+        }
+        args
+    }
+
+    /// Returns false for now. In the future, we might allow direct ssh/tls (or
+    /// even insecure tcp) connections between remote hosts.
+    pub fn direct_connection(&self) -> bool {
+        false
+    }
+
+    fn validate_identifier(value: &str) -> Result<String, &'static str> {
+        fn invalid_char(c: char) -> bool {
+            !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':' || c == '.')
+        }
+        if value.contains(invalid_char) {
+            Err("extra indentifier contains invalid chars!")
+        } else {
+            Ok(value.to_string())
+        }
     }
 }

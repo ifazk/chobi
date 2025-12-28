@@ -22,6 +22,7 @@ mod cmd;
 pub mod compress;
 mod fs;
 pub mod send_recv_opts;
+pub mod sync_pipelines;
 pub mod sys;
 pub mod util;
 pub mod zfs;

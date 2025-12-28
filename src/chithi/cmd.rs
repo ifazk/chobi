@@ -214,6 +214,12 @@ impl<'args, T> Cmd<'args, T> {
             args: self.args,
         }
     }
+    pub fn target(&self) -> &'args CmdTarget<'args> {
+        self.target
+    }
+    pub fn base(&self) -> &'static str {
+        self.base
+    }
 }
 
 fn escape_str<'a>(s: &'a str) -> Cow<'a, str> {
@@ -398,6 +404,10 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Pipeline<'args, T> {
     pub fn to_cmd(&self) -> Command {
         match self.target {
             CmdTarget::Local => {
+                // take a shortcut if there's only one cmd
+                if self.cmds.len() == 1 {
+                    return self.cmds[0].to_cmd();
+                }
                 let mut cmd = Command::new("sh");
                 cmd.args(["-c", "--"]);
                 if let Some(inner) = self.cmds.first() {
@@ -471,6 +481,11 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Pipeline<'args, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.target {
             CmdTarget::Local => {
+                // take a shortcut if there's only one cmd
+                if self.cmds.len() == 1 {
+                    write!(f, "{}", self.cmds[0])?;
+                    return Ok(());
+                }
                 write!(f, "sh -c -- ")?;
                 if let Some(cmd) = self.cmds.first() {
                     write!(f, "{}", cmd)?;

@@ -1,3 +1,19 @@
+//  Chobi and Chithi: Managment tools for ZFS snapshot, send, and recv
+//  Copyright (C) 2025  Ifaz Kabir
+
+//  This program is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+
+//  This program is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+
+//  You should have received a copy of the GNU General Public License
+//  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 use chrono::{Datelike, Timelike};
 use std::os::fd::{AsRawFd, RawFd};
 use std::{ffi, io, process};
@@ -200,223 +216,4 @@ pub fn capture(command: &mut process::Command) -> io::Result<process::Output> {
         stdout,
         stderr,
     })
-}
-
-pub fn try_terminate_if_running(child: &mut process::Child) -> io::Result<()> {
-    match child.try_wait() {
-        Ok(None) => {
-            let id = child.id();
-            unsafe {
-                let ret = libc::kill(id as libc::pid_t, libc::SIGTERM);
-                if ret == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-/// Run command and captures outputs. Also prints the errs if output_errs is true
-pub fn pipe_and_capture_stderr(
-    main: &mut process::Command,
-    pv: Option<&mut process::Command>,
-    other: &mut process::Command,
-    output_errs: bool,
-) -> io::Result<(process::Output, process::Output)> {
-    use process::Stdio;
-
-    let main = main
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut main_child = main.spawn()?;
-
-    let pv = match pv {
-        Some(pv) => {
-            let pv = pv
-                .stdin(Stdio::from(
-                    main_child.stdout.take().expect("stdout is piped"),
-                ))
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit());
-            Some(pv)
-        }
-        None => None,
-    };
-    let mut pv_child = match pv {
-        Some(pv) => match pv.spawn() {
-            Ok(child) => Some(child),
-            Err(e) => {
-                let _ = try_terminate_if_running(&mut main_child);
-                main_child.wait()?;
-                return Err(e);
-            }
-        },
-        None => None,
-    };
-
-    let other_stdin = pv_child
-        .as_mut()
-        .map(|pv_child| pv_child.stdout.take().expect("stdout is piped"))
-        .unwrap_or_else(|| main_child.stdout.take().expect("stdout is piped"));
-
-    let other = other
-        .stdin(Stdio::from(other_stdin))
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::piped());
-
-    let mut other_child = match other.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            if let Some(mut pv_child) = pv_child {
-                let _ = try_terminate_if_running(&mut pv_child);
-                pv_child.wait()?;
-            };
-            let _ = try_terminate_if_running(&mut main_child);
-            main_child.wait()?;
-            return Err(e);
-        }
-    };
-
-    // Handles that implement Drop
-    let main_err = main_child.stderr.take().expect("child stderr is piped");
-    let other_err = other_child.stderr.take().expect("child stderr is piped");
-
-    let mut children = vec![main_child, other_child];
-
-    // Setup
-    let mut outputs = read_until_hup(
-        &mut children,
-        &mut [main_err, other_err],
-        4096,
-        output_errs.then(io::stderr),
-    )?;
-
-    let pv_status = pv_child.as_mut().map(|pv_child| pv_child.wait());
-    if let Some(pv_status) = pv_status {
-        let pv_status = pv_status?;
-        if !pv_status.success() {
-            return Err(io::Error::other(format!("pv errored with {pv_status}")));
-        }
-    };
-
-    let other = outputs.pop().expect("lengths should match");
-    let other = process::Output {
-        status: other.1,
-        stdout: Vec::new(),
-        stderr: other.0,
-    };
-    let main = outputs.pop().expect("lengths should match");
-    let main = process::Output {
-        status: main.1,
-        stdout: Vec::new(),
-        stderr: main.0,
-    };
-
-    Ok((main, other))
-}
-
-/// This uses poll, so keep `reads` small in length.
-/// Keeps reading from reads until one of the fds in reads disconnects.
-/// Note: Does blocking writes on our_output.
-pub fn read_until_hup<T: io::Read + AsRawFd, S: io::Write>(
-    children: &mut [std::process::Child],
-    reads: &mut [T],
-    buf_size: usize,
-    mut our_output: Option<S>,
-) -> io::Result<Vec<(Vec<u8>, process::ExitStatus)>> {
-    let mut statuses = vec![None; children.len()];
-    // Set child fds to non-blocking
-    let fds = reads
-        .iter()
-        .map(|t| get_not_blocking_fd(t))
-        .collect::<io::Result<Vec<_>>>()?;
-
-    // Setup
-    let mut pollfds = fds
-        .iter()
-        .map(|&fd| libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        })
-        .collect::<Vec<_>>();
-    let mut idx_map = (0..reads.len()).collect::<Vec<_>>();
-    let mut readbuf = vec![0u8; buf_size];
-    let mut outputs = vec![Vec::new(); reads.len()];
-    let mut failed = false;
-    let timeout: libc::c_int = -1;
-    let mut remove_buffer = Vec::new();
-    loop {
-        if pollfds.is_empty() {
-            break;
-        };
-        let ret =
-            unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, timeout) };
-        if ret == -1 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            } else {
-                return Err(err);
-            }
-        };
-
-        for (pollfd_idx, pollfd) in pollfds.iter().enumerate() {
-            let idx = idx_map[pollfd_idx];
-            if poll_readable(pollfd.revents) {
-                match reads[idx].read(&mut readbuf) {
-                    Ok(n) => {
-                        outputs[idx].extend_from_slice(&readbuf[..n]);
-                        if let Some(our_output) = our_output.as_mut() {
-                            our_output.write_all(&readbuf[..n])?;
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
-                }
-            } else if poll_ended(pollfd.revents) && statuses[idx].is_none() {
-                let status = children[idx].wait()?;
-                if !status.success() {
-                    failed = true;
-                };
-                statuses[idx] = Some(status);
-                remove_buffer.push(pollfd_idx);
-            }
-        }
-
-        if !remove_buffer.is_empty() {
-            // sort so that removing later elements do not move earlier elements
-            remove_buffer.sort();
-            while let Some(idx) = remove_buffer.pop() {
-                pollfds.remove(idx);
-                idx_map.remove(idx);
-            }
-        }
-
-        if failed {
-            break;
-        }
-    }
-
-    if failed {
-        for idx in 0..statuses.len() {
-            if statuses[idx].is_none() {
-                let _ = try_terminate_if_running(&mut children[idx]);
-                let status = children[idx].wait()?;
-                statuses[idx] = Some(status);
-            }
-        }
-    }
-
-    let statuses = statuses
-        .into_iter()
-        .map(|status| status.expect("filled in nones"));
-
-    let output_statuses = outputs.into_iter().zip(statuses).collect::<Vec<_>>();
-
-    Ok(output_statuses)
 }

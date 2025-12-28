@@ -11,25 +11,31 @@ some more escaping might be needed.
 
 ## Current feature deviations/shortcomings
 
-1. Chithi: I've decided not to handle clones when replicating datasets. Part of
-   the reason is, I don't use clones myself. I haven't closed the door on
-   clones, but for now we assume `--no-clone-handling`.
-2. Chithi: For hostname checks for `syncoid:sync`, the machine's hostname must
+1. Chithi: For hostname checks for `syncoid:sync`, the machine's hostname must
    be less than 255 characters long.
-3. Chithi: We only support platforms which have the `-t` option for zfs, i.e. we
+2. Chithi: We only support platforms which have the `-t` option for zfs, i.e. we
    don't reimpelment the fallback snapshot fetching in syncoid. This means no
    solaris.
-4. Chithi: We use the regex-lite crate for rexeg, and therefore do not support
+3. Chithi: We use the regex-lite crate for rexeg, and therefore do not support
    unicode case insensitivity or unicode character classes like `\p{Letter}`.
-5. Chithi: Not supporting insecure direct connection.
-6. Chithi: For recursive syncs, by default we do a recrursive recv check before
+4. Chithi: Not supporting insecure direct connection.
+5. Chithi: For recursive syncs, by default we do a recrursive recv check before
    we start. This is to prevent multiple instances of chiti syncs for the same
    source and target running at the same time. This can be turned off using the
    `--no-recv-check-start` flag.
+6. When using bandwidth limits with a local send/recv, syncoid prefers to use
+   the source bandwidth limit. We use the source bandwidth limit for
+   limiting network transfers, so we ignore it completely for local send/recv.
+   We interpret the target bandwidth limit for limiting disk writes, so we only
+   use that for local send/recv.
 
 ## Chithi features not found in syncoid 2.3
 1. Cli `--{source,target}-host`.
 2. Cli `--max-delay-seconds`.
+3. Cli `--skip-optional-commands`. This can be used with `--no-command-checks`
+   to control what commands get enabled.
+4. When both the source and target are remote, we can run `pv` on one of the
+   remote machines over ssh.
 
 # Why Rust? Why Not Go?
 There are no technical or social reasons why I'm choosing Rust. Go would have
@@ -39,9 +45,10 @@ my end.
 
 # Development note
 It is an explicit goal to be single threaded, and use non-blocking code without
-busy spinning. There should not be any thread spawning code anywhere here. It is
-also an explicit goal to only rely on posix instead of needing separate special
-case code for Linux and FreeBSD.
+busy spinning. There should not be any thread spawning code anywhere here,
+except in the case of parallel sends but even in that case individual sends
+should be single threaded. It is also an explicit goal to only rely on posix
+instead of needing separate special case code for Linux and FreeBSD.
 
 # ETA when?
 Perhaps never. If I get to understand all the features of sanoid and syncoid
@@ -52,8 +59,6 @@ release the binary for chithi if I finish the following features.
 
 - Restart-on-fail
 - Parallel/Concurrent sends
-- Bookmark support
-- Bandwidth limits
 - Preserve properties
 - Check for ZFS resume feature before using it
 - Check for keystatus and encryption for non-raw sends
@@ -66,6 +71,7 @@ release the binary for chithi if I finish the following features.
   + Manage sync snaps
   + Manage target snapshots
   + Manage ssh master
+  + Cleanup for --no-stream
 
 # Contributing
 I am not accepting PRs or contributions to the project. The project isn't ready
