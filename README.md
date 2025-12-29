@@ -36,6 +36,9 @@ some more escaping might be needed.
    to control what commands get enabled.
 4. When both the source and target are remote, we can run `pv` on the source
    machine over ssh.
+5. Cli `--prune-formats`. Can use "--prune-format chithi --prune-format syncoid"
+   to prune both formats. Defaults to "--prune-format chithi" if not set.
+6. Cli `--dry-run`.
 
 # Why Rust? Why Not Go?
 There are no technical or social reasons why I'm choosing Rust. Go would have
@@ -68,7 +71,6 @@ release the binary for chithi if I finish the following features.
 - Cleanup
   + Manage holds
   + Manage bookmarks
-  + Manage sync snaps
   + Manage target snapshots
   + Cleanup for --no-stream
 

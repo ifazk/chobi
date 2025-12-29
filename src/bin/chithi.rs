@@ -19,7 +19,7 @@ use chobi::chithi::sync_pipelines::OptionalCommands;
 use chobi::chithi::sys::{get_syncoid_date, hostname};
 use chobi::chithi::util::ReadableBytes;
 use chobi::chithi::zfs::{Creation, IntermediateSource, Snapshot, SnapshotInfo};
-use chobi::chithi::{Args, Cmd, CmdTarget, Fs, Role, get_is_roots, sys};
+use chobi::chithi::{Args, Cmd, CmdTarget, Fs, Role, Sequence, get_is_roots};
 use clap::Parser;
 use log::{debug, error, info, trace, warn};
 use regex_lite::Regex;
@@ -1036,6 +1036,82 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         ))
     }
 
+    fn prune_old_sync_snaps(
+        &self,
+        fs: &Fs,
+        snapshots: &[Snapshot<String>],
+        new_snapshot: &str,
+        hostname: &str,
+    ) -> io::Result<()> {
+        let format_prefixes = self
+            .args
+            .prune_formats
+            .iter()
+            .map(|format| {
+                format!(
+                    "{format}_{}{hostname}",
+                    self.args.identifier.as_deref().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut snaps = Vec::new();
+        for snap in snapshots {
+            // Don't delete newly created snapshots
+            if snap.name == new_snapshot {
+                continue;
+            }
+            if format_prefixes
+                .iter()
+                .any(|format_prefix| snap.name.starts_with(format_prefix))
+            {
+                snaps.push(format!("{}@{}", fs.fs, snap.name));
+            }
+        }
+        if snaps.is_empty() {
+            return Ok(());
+        }
+        let zfs = self.pick_zfs(fs.role);
+        let target = zfs.target();
+        let zfs = zfs.to_mut().to_local();
+        const MAX_PRUNE: usize = 10usize;
+        for chunk in snaps.chunks(MAX_PRUNE) {
+            let cmds = chunk
+                .iter()
+                .map(|snap| {
+                    let mut zfs = zfs.to_mut();
+                    zfs.args(["destroy", snap]);
+                    zfs
+                })
+                .collect::<Vec<_>>();
+            if let Some(sequence) = Sequence::from(target, cmds) {
+                if chunk.len() == 1 {
+                    // nicer debug message in the usual case
+                    debug!(
+                        "pruning 1 snapshot from {}: {}",
+                        target.pretty_str(),
+                        chunk[0]
+                    );
+                } else {
+                    debug!(
+                        "pruning {} snapshots from {}",
+                        chunk.len(),
+                        target.pretty_str()
+                    );
+                }
+                let mut seq = sequence.to_cmd();
+                let status = seq
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()?;
+                if !status.success() {
+                    warn!("'{}' failed with: {status}", sequence);
+                }
+            };
+        }
+        Ok(())
+    }
+
     // skip_sync_snapshot is set to true for these senarios
     // 1. fallback clone creation
     // 2. !bookmark && force-delete && delete successful (redo sync and skip snapshot creation beacuse it was already done)
@@ -1064,7 +1140,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         } else if !["true", "-", ""].contains(&sync.as_str()) {
             // empty is handled the same as "-", hostnames "true" and "false" are
             // unsupported, and hostnames cannot start with "-" anyway (citation needed)
-            let host_id = sys::hostname()?;
+            let host_id = hostname()?;
             if !sync.split(',').any(|x| x == host_id) {
                 info!("Skipping dataset (syncoid:sync does not contain {host_id}): {source}...");
                 return Ok(());
@@ -1119,10 +1195,12 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
         self.dump_snaps_maybe(source, &source_snaps);
 
+        let mut created_new_sync_snap = None;
         let newest_sync_snapshot = if !self.args.no_sync_snap && !skip_sync_snapshot {
             let new_sync_snap = self.new_sync_snap(source)?;
             if let Some(new_snap_name) = new_sync_snap {
                 // before returning, update source snaps
+                created_new_sync_snap = Some(new_snap_name.clone());
                 source_snaps.push(Snapshot::fake_newest(new_snap_name.clone()));
                 new_snap_name
             } else {
@@ -1156,7 +1234,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
         // Finally do syncs
         // If target does not exist, create it with inital full sync, and get target snaps
-        let target_snaps_list = if !target_exists {
+        let mut target_snaps_list = if !target_exists {
             if self.args.no_stream {
                 debug!(
                     "target {target} does not exist, and --no-stream selected. Syncing newest snapshot for {source}"
@@ -1180,7 +1258,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         } else {
             self.get_snaps(target)?
         };
-        let target_snaps_map = Snapshot::list_to_map(&target_snaps_list);
+        let mut target_snaps_map = Snapshot::list_to_map(&target_snaps_list);
         let source_bookmarks_maybe;
 
         let matching_snapshot_and_later = {
@@ -1231,7 +1309,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 if self.args.force_delete && !target.fs.contains('/') {
                     // force delete is not possible for root file systems
                     error!(
-                        "NOTE: Target {target} is a root dataset. Force delete is not possibe for root datasets. Please delete {target} manually."
+                        "NOTE: Target {target} is a root dataset. Force delete is not possible for root datasets. Please delete {target} manually."
                     );
                     return Err(io::Error::other("not deleting root dataset"));
                 } else if self.args.force_delete {
@@ -1252,10 +1330,10 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                         return self.sync_full(source, target, &newest_sync_snapshot);
                     } else {
                         self.sync_full(source, target, oldest_snapshot.name)?;
-                        let target_snaps =
-                            HashMap::from([(oldest_snapshot.name, oldest_snapshot.into())]);
+                        target_snaps_list = vec![(&oldest_snapshot).into()];
+                        target_snaps_map = Snapshot::list_to_map(&target_snaps_list);
                         let Some(matching_snapshots) =
-                            self.get_matching_snapshot(&source_snaps, &target_snaps)
+                            self.get_matching_snapshot(&source_snaps, &target_snaps_map)
                         else {
                             error!(
                                 "internal error, target snapshots list created from oldest snapshot, but getting matching list failed"
@@ -1301,10 +1379,20 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                     .last()
                     .expect("non-empty checked")
                     .name,
-            )
+            )?
         } else {
-            self.sync_incremental_or_fallback(source, target, matching_snapshot_and_later)
+            self.sync_incremental_or_fallback(source, target, matching_snapshot_and_later)?
+        };
+
+        if !self.args.keep_sync_snap
+            && let Some(new_sync_snap) = created_new_sync_snap
+        {
+            let hostname = hostname()?;
+            self.prune_old_sync_snaps(source, &source_snaps, &new_sync_snap, &hostname)?;
+            self.prune_old_sync_snaps(target, &target_snaps_list, &new_sync_snap, &hostname)?;
         }
+
+        Ok(())
     }
 }
 

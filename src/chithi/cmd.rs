@@ -462,14 +462,15 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> From<&Cmd<'args, T>> for Cmd<'args, Vec
     }
 }
 
-/// Builds a pipeline of commands that will be passed as a script via ssh or sh -c
-pub struct Pipeline<'args, T> {
+/// Builds a vector of commands that will be passed as a script via ssh or sh
+/// -c. Used by Pipeline and Sequence.
+pub struct CmdVec<'args, T> {
     target: &'args CmdTarget<'args>,
     use_terminal_if_ssh: bool,
     cmds: Vec<Cmd<'args, T>>,
 }
 
-impl<'args, T> Pipeline<'args, T> {
+impl<'args, T> CmdVec<'args, T> {
     pub fn new(target: &'args CmdTarget<'args>, cmd: Cmd<'args, T>) -> Self {
         Self {
             target,
@@ -486,7 +487,7 @@ impl<'args, T> Pipeline<'args, T> {
     pub fn use_terminal_if_ssh(&mut self, value: bool) {
         self.use_terminal_if_ssh = value;
     }
-    /// return none if input is empty
+    /// return none if input is empty, otherwise guaranteed to be some
     pub fn from(target: &'args CmdTarget<'args>, mut from: Vec<Cmd<'args, T>>) -> Option<Self> {
         from.reverse();
         if let Some(first) = from.pop() {
@@ -501,8 +502,8 @@ impl<'args, T> Pipeline<'args, T> {
     }
 }
 
-impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Pipeline<'args, T> {
-    pub fn to_cmd(&self) -> Command {
+impl<'args, 'cmd, T: AsRef<[&'cmd str]>> CmdVec<'args, T> {
+    fn to_cmd_with_sep(&self, sep: &str) -> Command {
         match self.target {
             CmdTarget::Local => {
                 // take a shortcut if there's only one cmd
@@ -516,7 +517,7 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Pipeline<'args, T> {
                     let mut arg = String::new();
                     write!(arg, "{}", Self::escape_cmd(inner)).expect("formatting should not fail");
                     for inner in &self.cmds[1..] {
-                        write!(arg, " | {}", Self::escape_cmd(inner))
+                        write!(arg, " {} {}", sep, Self::escape_cmd(inner))
                             .expect("formatting should not fail");
                     }
                     cmd.arg(arg);
@@ -541,7 +542,7 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Pipeline<'args, T> {
                 if let Some(first) = self.cmds.first() {
                     cmd.arg(Self::escape_cmd(first));
                     for other in &self.cmds[1..] {
-                        cmd.arg("|");
+                        cmd.arg(sep);
                         cmd.arg(Self::escape_cmd(other));
                     }
                 };
@@ -576,10 +577,8 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Pipeline<'args, T> {
         }
         result
     }
-}
 
-impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Pipeline<'args, T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt_with_sep(&self, f: &mut std::fmt::Formatter<'_>, sep: &str) -> std::fmt::Result {
         match self.target {
             CmdTarget::Local => {
                 // take a shortcut if there's only one cmd
@@ -591,7 +590,7 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Pipeline<'args, T> {
                 if let Some(cmd) = self.cmds.first() {
                     write!(f, "{}", cmd)?;
                     for cmd in &self.cmds[1..] {
-                        write!(f, " | {}", cmd)?;
+                        write!(f, " {} {}", sep, cmd)?;
                     }
                 }
             }
@@ -600,11 +599,61 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Pipeline<'args, T> {
                 if let Some(cmd) = self.cmds.first() {
                     write!(f, "{}", Self::escape_cmd(cmd))?;
                     for cmd in &self.cmds[1..] {
-                        write!(f, " | {}", Self::escape_cmd(cmd))?;
+                        write!(f, " {} {}", sep, Self::escape_cmd(cmd))?;
                     }
                 }
             }
         }
         Ok(())
+    }
+}
+
+/// Thin wrapper around CmdVec to build a pipeline of commands that will be
+/// passed as a script via ssh or sh -c
+pub struct Pipeline<'args, T>(pub CmdVec<'args, T>);
+
+impl<'args, T> Pipeline<'args, T> {
+    pub fn new(target: &'args CmdTarget<'args>, cmd: Cmd<'args, T>) -> Self {
+        Self(CmdVec::new(target, cmd))
+    }
+    pub fn from(target: &'args CmdTarget<'args>, from: Vec<Cmd<'args, T>>) -> Option<Self> {
+        CmdVec::from(target, from).map(Self)
+    }
+}
+
+impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Pipeline<'args, T> {
+    pub fn to_cmd(&self) -> Command {
+        self.0.to_cmd_with_sep("|")
+    }
+}
+
+impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Pipeline<'args, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt_with_sep(f, "|")
+    }
+}
+
+/// Thin wrapper around CmdVec to build a pipeline of commands that will be
+/// passed as a script via ssh or sh -c
+pub struct Sequence<'args, T>(pub CmdVec<'args, T>);
+
+impl<'args, T> Sequence<'args, T> {
+    pub fn new(target: &'args CmdTarget<'args>, cmd: Cmd<'args, T>) -> Self {
+        Self(CmdVec::new(target, cmd))
+    }
+    pub fn from(target: &'args CmdTarget<'args>, from: Vec<Cmd<'args, T>>) -> Option<Self> {
+        CmdVec::from(target, from).map(Self)
+    }
+}
+
+impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Sequence<'args, T> {
+    pub fn to_cmd(&self) -> Command {
+        self.0.to_cmd_with_sep(";")
+    }
+}
+
+impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Sequence<'args, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt_with_sep(f, ";")
     }
 }

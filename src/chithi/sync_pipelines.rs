@@ -765,7 +765,7 @@ impl<'args> OptionalCommands<'args> {
                     source_pipeline.into_iter().flatten().collect(),
                 )
                 .expect("contains some");
-                source_pipeline.use_terminal_if_ssh(source_terminal);
+                source_pipeline.0.use_terminal_if_ssh(source_terminal);
                 let target_pipeline = [target_compress, target_mbuffer, Some(recv_cmd)];
                 let target_pipeline = Pipeline::from(
                     self.target_cmd_target,
@@ -788,7 +788,7 @@ impl<'args> OptionalCommands<'args> {
                     target_pipeline.into_iter().flatten().collect(),
                 );
                 if let Some(target_pipeline) = target_pipeline.as_mut() {
-                    target_pipeline.use_terminal_if_ssh(target_terminal)
+                    target_pipeline.0.use_terminal_if_ssh(target_terminal)
                 }
                 (source_pipeline, None, target_pipeline)
             }
@@ -801,7 +801,7 @@ impl<'args> OptionalCommands<'args> {
                     source_pipeline.into_iter().flatten().collect(),
                 )
                 .expect("contains some");
-                source_pipeline.use_terminal_if_ssh(source_terminal);
+                source_pipeline.0.use_terminal_if_ssh(source_terminal);
                 let target_terminal = target_pv.is_some();
                 let target_pipeline = [target_compress, target_mbuffer, target_pv, Some(recv_cmd)];
                 let mut target_pipeline = Pipeline::from(
@@ -809,7 +809,7 @@ impl<'args> OptionalCommands<'args> {
                     target_pipeline.into_iter().flatten().collect(),
                 );
                 if let Some(target_pipeline) = target_pipeline.as_mut() {
-                    target_pipeline.use_terminal_if_ssh(target_terminal)
+                    target_pipeline.0.use_terminal_if_ssh(target_terminal)
                 }
                 (source_pipeline, None, target_pipeline)
             }
@@ -822,7 +822,7 @@ impl<'args> OptionalCommands<'args> {
                     source_pipeline.into_iter().flatten().collect(),
                 )
                 .expect("contains some");
-                source_pipeline.use_terminal_if_ssh(source_terminal);
+                source_pipeline.0.use_terminal_if_ssh(source_terminal);
                 let local_pipeline = [
                     local_target_mbuffer,
                     local_decompress,

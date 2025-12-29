@@ -30,5 +30,7 @@ pub mod zfs;
 pub use args::Args;
 pub use cmd::Cmd;
 pub use cmd::CmdTarget;
+pub use cmd::CmdVec;
 pub use cmd::Pipeline;
+pub use cmd::Sequence;
 pub use fs::{Fs, Role, get_is_roots};

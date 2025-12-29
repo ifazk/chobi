@@ -70,6 +70,20 @@ pub struct Args {
     #[arg(long)]
     pub no_sync_snap: bool,
 
+    /// Does not prune sync snaps at the end of transfers
+    #[arg(long)]
+    pub keep_sync_snap: bool,
+
+    /// If transfer creates new sync snaps, this option chooses what kind of
+    /// snapshot formats to prune at the end of transfers. Current options are
+    /// syncoid and chithi.
+    #[arg(
+        long = "prune-format",
+        default_value = "chithi",
+        value_name = "SNAPFORMAT"
+    )]
+    pub prune_formats: Vec<String>,
+
     /// Does not rollback snapshots on target (it probably requires a readonly target)
     #[arg(long)]
     pub no_rollback: bool,
@@ -111,7 +125,7 @@ pub struct Args {
     pub ssh_identity: Option<String>,
 
     /// Passes OPTION to ssh for remote usage. Can be specified multiple times
-    #[arg(short = 'o', long = "sshoption", value_name = "OPTION")]
+    #[arg(short = 'o', long = "ssh-option", value_name = "OPTION")]
     pub ssh_options: Vec<String>,
 
     /// Prints out a lot of additional information during a chithi run. Logs overridden by --quiet and RUST_LOG environment variable
