@@ -34,8 +34,8 @@ some more escaping might be needed.
 2. Cli `--max-delay-seconds`.
 3. Cli `--skip-optional-commands`. This can be used with `--no-command-checks`
    to control what commands get enabled.
-4. When both the source and target are remote, we can run `pv` on one of the
-   remote machines over ssh.
+4. When both the source and target are remote, we can run `pv` on the source
+   machine over ssh.
 
 # Why Rust? Why Not Go?
 There are no technical or social reasons why I'm choosing Rust. Go would have
@@ -70,7 +70,6 @@ release the binary for chithi if I finish the following features.
   + Manage bookmarks
   + Manage sync snaps
   + Manage target snapshots
-  + Manage ssh master
   + Cleanup for --no-stream
 
 # Contributing

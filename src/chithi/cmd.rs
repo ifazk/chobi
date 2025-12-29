@@ -29,25 +29,56 @@ type SshOption = String;
 #[derive(PartialEq, Eq)]
 pub struct Ssh<'args> {
     host: &'args str,
+    cipher: Option<&'args str>,
+    config: Option<&'args str>,
+    identity: Option<&'args str>,
+    port: Option<&'args str>,
     control: Option<String>,
     options: &'args Vec<SshOption>,
 }
 
 impl<'args> Ssh<'args> {
-    pub fn new(host: &'args str, options: &'args Vec<SshOption>) -> Self {
+    pub fn new(
+        host: &'args str,
+        cipher: Option<&'args str>,
+        config: Option<&'args str>,
+        identity: Option<&'args str>,
+        port: Option<&'args str>,
+        options: &'args Vec<SshOption>,
+    ) -> Self {
         Self {
             host,
+            cipher,
+            config,
+            identity,
+            port,
             control: None,
             options,
         }
     }
-    pub fn to_cmd(&self) -> Command {
+    fn make_pre_cmd(&self) -> Command {
         let mut cmd = Command::new("ssh");
-        if let Some(control) = &self.control {
-            cmd.args(["-S", control]);
+        if let Some(cipher) = self.cipher {
+            cmd.args(["-c", cipher]);
+        };
+        if let Some(config) = self.config {
+            cmd.args(["-F", config]);
+        };
+        if let Some(identity) = self.identity {
+            cmd.args(["-i", identity]);
+        };
+        if let Some(port) = self.port {
+            cmd.args(["-p", port]);
         };
         for option in self.options {
             cmd.args(["-o", option]);
+        }
+        cmd
+    }
+    pub fn to_cmd(&self) -> Command {
+        let mut cmd = self.make_pre_cmd();
+        if let Some(control) = &self.control {
+            cmd.args(["-S", control]);
         }
         cmd.arg(self.host);
         cmd
@@ -64,9 +95,16 @@ impl<'args> CmdTarget<'args> {
     pub fn new_local() -> Self {
         Self::Local
     }
-    pub fn new(host: Option<&'args str>, ssh_options: &'args Vec<SshOption>) -> Self {
+    pub fn new(
+        host: Option<&'args str>,
+        cipher: Option<&'args str>,
+        config: Option<&'args str>,
+        identity: Option<&'args str>,
+        port: Option<&'args str>,
+        ssh_options: &'args Vec<SshOption>,
+    ) -> Self {
         host.map_or(Self::Local, |host| {
-            let ssh = Ssh::new(host, ssh_options);
+            let ssh = Ssh::new(host, cipher, config, identity, port, ssh_options);
             Self::Remote { ssh }
         })
     }
@@ -111,9 +149,11 @@ impl<'args> CmdTarget<'args> {
             CmdTarget::Remote { ssh } => ssh.control = control.map(|c| c.to_string()),
         }
     }
-    pub fn make_control(&mut self) -> Option<&str> {
+    pub fn make_control(&mut self) -> io::Result<Option<&str>> {
+        // Syncoid does sshcmd = sshcmd $args{sshconfig} $args{sshcipher} $sshoptions $args{sshport} $args{sshkey}
+        // Then runs sshcmd -M -S socket -o ControlPersist=1m $args{sshport} $rhost exit
         match self {
-            CmdTarget::Local => None,
+            CmdTarget::Local => Ok(None),
             CmdTarget::Remote { ssh } => {
                 let host_sanitized: String = ssh
                     .host
@@ -138,7 +178,11 @@ impl<'args> CmdTarget<'args> {
                 let control = format!(
                     "/tmp/chithi-{host_sanitized}-{year:04}{mon:02}{mday:02}{hour:02}{min:02}{sec:02}-{id}-{rand}"
                 );
-                let mut cmd = Command::new("ssh");
+                debug!(
+                    "creating ssh master control socket for {}: {control}",
+                    ssh.host
+                );
+                let mut cmd = ssh.make_pre_cmd();
                 // TODO ssh port?
                 cmd.args([
                     "-M",
@@ -149,14 +193,59 @@ impl<'args> CmdTarget<'args> {
                     ssh.host,
                     "exit",
                 ]);
+                let err = io::Error::other("creating master control failed");
                 match cmd.status() {
                     Ok(exit) if exit.success() => {
-                        ssh.control = Some(control);
-                        ssh.control.as_deref()
+                        let mut echo_test = ssh.make_pre_cmd();
+                        echo_test.args(["-S", &control, ssh.host, "echo", "-n"]);
+                        match echo_test.status() {
+                            Ok(exit) if exit.success() => {
+                                ssh.control = Some(control);
+                                Ok(ssh.control.as_deref())
+                            }
+                            Ok(exit) => {
+                                error!("master control echo test exited with {exit}");
+                                Err(err)
+                            }
+                            Err(e) => {
+                                error!("master control echo test failed with {e}");
+                                Err(err)
+                            }
+                        }
                     }
-                    _ => None,
+                    Ok(exit) => {
+                        error!("creating master control exited with {exit}");
+                        Err(err)
+                    }
+                    Err(e) => {
+                        error!("creating master control failed with {e}");
+                        Err(err)
+                    }
                 }
             }
+        }
+    }
+
+    pub fn destroy_control(&mut self) -> io::Result<()> {
+        match self {
+            CmdTarget::Local => Ok(()),
+            CmdTarget::Remote { ssh } => match ssh.control.take() {
+                Some(control) => {
+                    let mut exit_cmd = ssh.make_pre_cmd();
+                    exit_cmd.args(["-S", control.as_str(), ssh.host, "-O", "exit"]);
+                    let status = exit_cmd
+                        .stdout(Stdio::null())
+                        .stdin(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()?;
+                    if status.success() {
+                        Ok(())
+                    } else {
+                        Err(io::Error::other("destroying ssh control failed"))
+                    }
+                }
+                None => Ok(()),
+            },
         }
     }
     pub fn on_str(&self) -> &str {
@@ -185,8 +274,20 @@ impl<'args> Display for CmdTarget<'args> {
             CmdTarget::Local => {}
             CmdTarget::Remote { ssh } => {
                 write!(f, "ssh ")?;
+                if let Some(cipher) = ssh.cipher {
+                    write!(f, "-c {cipher} ")?;
+                };
+                if let Some(config) = ssh.config {
+                    write!(f, "-F {config} ")?;
+                };
+                if let Some(identity) = ssh.identity {
+                    write!(f, "-i {identity} ")?;
+                };
+                if let Some(port) = ssh.port {
+                    write!(f, "-p {port} ")?;
+                };
                 if let Some(control) = &ssh.control {
-                    write!(f, "{} ", control)?;
+                    write!(f, "-S {} ", control)?;
                 }
                 for option in ssh.options {
                     write!(f, "-o {} ", option)?;
@@ -494,18 +595,8 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Display for Pipeline<'args, T> {
                     }
                 }
             }
-            CmdTarget::Remote { ssh } => {
-                write!(f, "ssh ")?;
-                if self.use_terminal_if_ssh {
-                    write!(f, "-t -o LogLevel=QUIET ")?;
-                }
-                if let Some(control) = &ssh.control {
-                    write!(f, "-S {control} ")?;
-                }
-                for option in ssh.options {
-                    write!(f, "-o {} ", option)?;
-                }
-                write!(f, "{} ", ssh.host)?;
+            CmdTarget::Remote { .. } => {
+                write!(f, "{}", self.target)?;
                 if let Some(cmd) = self.cmds.first() {
                     write!(f, "{}", Self::escape_cmd(cmd))?;
                     for cmd in &self.cmds[1..] {

@@ -94,6 +94,22 @@ pub struct Args {
     #[arg(long, value_name = "OPTIONS", value_parser = Opts::try_from_str, default_value_t)]
     pub recv_options: Opts<Vec<OptionsLine<String>>>,
 
+    /// Passes CIPHER to ssh to use a particular cipher set.
+    #[arg(short = 'c', long, value_name = "CIPHER")]
+    pub ssh_cipher: Option<String>,
+
+    /// Connects to remote machines on a particular port.
+    #[arg(short = 'P', long, value_name = "PORT")]
+    pub ssh_port: Option<String>,
+
+    /// Uses config FILE for connecting to remote machines over ssh.
+    #[arg(short = 'F', long, value_name = "FILE")]
+    pub ssh_config: Option<String>,
+
+    /// Uses identity FILE to connect to remote machines over ssh.
+    #[arg(short = 'i', long, value_name = "FILE")]
+    pub ssh_identity: Option<String>,
+
     /// Passes OPTION to ssh for remote usage. Can be specified multiple times
     #[arg(short = 'o', long = "sshoption", value_name = "OPTION")]
     pub ssh_options: Vec<String>,

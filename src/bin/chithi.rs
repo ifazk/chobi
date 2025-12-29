@@ -121,11 +121,27 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         }
         if source_cmd_target.is_remote() || target_cmd_target.is_remote() {
             if source_cmd_target.host() == target_cmd_target.host() {
-                let source_control = source_cmd_target.make_control();
+                let source_control = source_cmd_target.make_control()?;
                 target_cmd_target.set_control(source_control);
             } else {
-                source_cmd_target.make_control();
-                target_cmd_target.make_control();
+                source_cmd_target.make_control()?;
+                target_cmd_target.make_control()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn destroy_ssh_masters(
+        source_cmd_target: &mut CmdTarget,
+        target_cmd_target: &mut CmdTarget,
+    ) -> io::Result<()> {
+        if source_cmd_target.is_remote() || target_cmd_target.is_remote() {
+            if source_cmd_target.host() == target_cmd_target.host() {
+                target_cmd_target.set_control(None);
+                source_cmd_target.destroy_control()?;
+            } else {
+                source_cmd_target.destroy_control()?;
+                target_cmd_target.destroy_control()?;
             }
         }
         Ok(())
@@ -1328,8 +1344,22 @@ fn main() -> io::Result<()> {
     trace!("built fs");
 
     // Build command targets
-    let mut source_cmd_target = CmdTarget::new(source.host, &args.ssh_options);
-    let mut target_cmd_target = CmdTarget::new(target.host, &args.ssh_options);
+    let mut source_cmd_target = CmdTarget::new(
+        source.host,
+        args.ssh_cipher.as_deref(),
+        args.ssh_config.as_deref(),
+        args.ssh_identity.as_deref(),
+        args.ssh_port.as_deref(),
+        &args.ssh_options,
+    );
+    let mut target_cmd_target = CmdTarget::new(
+        target.host,
+        args.ssh_cipher.as_deref(),
+        args.ssh_config.as_deref(),
+        args.ssh_identity.as_deref(),
+        args.ssh_port.as_deref(),
+        &args.ssh_options,
+    );
     let local_cmd_target = CmdTarget::new_local();
 
     trace!("built cmd targets");
@@ -1409,6 +1439,8 @@ fn main() -> io::Result<()> {
             cmds.sync_dataset(fs, child_target, false)?;
         }
     }
+
+    CmdConfig::destroy_ssh_masters(&mut source_cmd_target, &mut target_cmd_target)?;
 
     Ok(())
 }
