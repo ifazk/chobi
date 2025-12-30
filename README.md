@@ -31,14 +31,13 @@ some more escaping might be needed.
 
 ## Chithi features not found in syncoid 2.3
 1. Cli `--{source,target}-host`.
-2. Cli `--max-delay-seconds`.
-3. Cli `--skip-optional-commands`. This can be used with `--no-command-checks`
+2. Cli `--skip-optional-commands`. This can be used with `--no-command-checks`
    to control what commands get enabled.
-4. When both the source and target are remote, we can run `pv` on the source
+3. When both the source and target are remote, we can run `pv` on the source
    machine over ssh.
-5. Cli `--prune-formats`. Can use "--prune-format chithi --prune-format syncoid"
+4. Cli `--prune-formats`. Can use "--prune-format chithi --prune-format syncoid"
    to prune both formats. Defaults to "--prune-format chithi" if not set.
-6. Cli `--dry-run`.
+5. Cli `--dry-run`.
 
 # Why Rust? Why Not Go?
 There are no technical or social reasons why I'm choosing Rust. Go would have
@@ -60,8 +59,7 @@ release the binary for chithi if I finish the following features.
 
 ## Current TODOs for Chithi
 
-- Restart-on-fail
-- Parallel/Concurrent sends
+- Move sync to subcommand
 - Preserve properties
 - Check for ZFS resume feature before using it
 - Check for keystatus and encryption for non-raw sends
@@ -69,10 +67,25 @@ release the binary for chithi if I finish the following features.
    + Use 'chithi:sync' but allow fallback to check for 'syncoid:sync'
    + Allow format flags for pruning both syncoid and chithi sync snaps
 - Cleanup
-  + Manage holds
   + Manage bookmarks
   + Manage target snapshots
   + Cleanup for --no-stream
+
+## Roadmap for Chithi
+
+- Move syncing to sync subcommand
+- `chithi run` subcommand that takes a spec file, and runs syncs in that spec file.
+  + Restart on fail, retry-max, jitter, initial-start-delay, will be handled by
+    `chithi run`
+  + Parallel by default, allow overriding to be sequential.
+  + If no spec file provided, looks for toml files in /etc/chithi/. If there's
+    only /etc/chithi/chithi.toml, then run that file.
+- Chithi status that takes a spec file, and shows how far behind the monthly,
+  daily snapshots are.
+  + Defaults to monthly, daily. But can customize to "monthly,daily,hourly".
+  + Looks for toml files in current directory, falling back to /etc/chithi/, if
+    none found. Does status checks on every toml file.
+- Chithi external subcommands.
 
 # Contributing
 I am not accepting PRs or contributions to the project. The project isn't ready

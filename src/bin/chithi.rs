@@ -28,8 +28,6 @@ use std::{
     collections::{HashMap, HashSet},
     io::{self, BufRead, BufReader},
     process::Stdio,
-    thread::sleep,
-    time::Duration,
 };
 
 const DOES_NOT_EXIST: &str = "dataset does not exist";
@@ -575,7 +573,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         &self,
         source: &Fs,
         target: &Fs,
-        from_intermediate: IntermediateSource,
+        from_intermediate: &IntermediateSource,
         to_snapshot: &str,
     ) -> io::Result<()> {
         let from_source = from_intermediate.source();
@@ -616,7 +614,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         &self,
         source: &Fs,
         target: &Fs,
-        (intermediate_source, snapshots): (IntermediateSource, &[Snapshot<String>]),
+        (intermediate_source, snapshots): &(IntermediateSource, &[Snapshot<String>]),
     ) -> io::Result<()> {
         if !self.args.include_snaps.is_empty() || !self.args.exclude_snaps.is_empty() {
             info!(
@@ -629,7 +627,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             for snapshots in snapshots.windows(2) {
                 let from_snapshot = IntermediateSource::Snapshot((&snapshots[0]).into());
                 let to_snapshot = &snapshots.last().expect("windows length 2").name;
-                self.sync_intermidiate(source, target, from_snapshot, to_snapshot)?
+                self.sync_intermidiate(source, target, &from_snapshot, to_snapshot)?
             }
             Ok(())
         } else {
@@ -639,7 +637,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                     let to_snapshot = &snapshots.last().expect("non-empty checked").name;
                     self.sync_incremental(source, target, from_snapshot, to_snapshot)
                 }
-                from_bookmark @ IntermediateSource::Bookmark(_) => {
+                from_bookmark @ IntermediateSource::Bookmark(_, _) => {
                     let next_snapshot = snapshots.first().expect("non-empty checked");
                     self.sync_intermidiate(source, target, from_bookmark, &next_snapshot.name)?;
                     if snapshots.len() > 1 {
@@ -1005,7 +1003,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 
     fn get_matching_bookmark<'b, 'c>(
         &self,
-        sorted_target_snaps: &[Snapshot<String>],
+        sorted_target_snaps: &'b [Snapshot<String>],
         sorted_source_bookmarks: &'b [Snapshot<String>],
         sorted_source_snaps: &'c [Snapshot<String>],
     ) -> Option<(IntermediateSource<'b>, &'c [Snapshot<String>])> {
@@ -1031,9 +1029,35 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                 &sorted_source_snaps[idx..]
             });
         Some((
-            IntermediateSource::Bookmark(bookmark.into()),
+            IntermediateSource::Bookmark(bookmark.into(), &target_snap.name),
             source_snaps_later,
         ))
+    }
+
+    /// This fails silently in terms of the Result type, but does output an error log.
+    fn zfs_hold(&self, cmd: &str, hold_name: &str, fs: &Fs, snapshot_name: &str) -> io::Result<()> {
+        let fs_snapshot = format!("{}@{snapshot_name}", fs.fs);
+        let mut zfs = self.pick_zfs(fs.role).to_mut();
+        zfs.args([cmd, hold_name, &fs_snapshot]);
+        if cmd == "hold" {
+            debug!("Setting new hold on {fs} with {zfs}...")
+        } else {
+            debug!("Releasing hold hold on {fs} with {zfs}...")
+        }
+        let mut zfs_cmd = zfs.to_cmd();
+        zfs_cmd.stdin(Stdio::null()).stdout(Stdio::null());
+        if self.args.debug {
+            zfs_cmd.stderr(Stdio::inherit());
+        } else {
+            zfs_cmd.stderr(Stdio::null());
+        };
+        let status = zfs_cmd.status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            warn!("{zfs} failed with {status}");
+            Ok(())
+        }
     }
 
     fn prune_old_sync_snaps(
@@ -1364,6 +1388,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                     matching_snapshot_and_later.0.source()
                 );
             }
+            // TODO decide is hold management, sync-snap-pruning is needed for target_created || resumed
             return Ok(());
         }
 
@@ -1373,7 +1398,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             self.sync_intermidiate(
                 source,
                 target,
-                matching_snapshot_and_later.0,
+                &matching_snapshot_and_later.0,
                 &matching_snapshot_and_later
                     .1
                     .last()
@@ -1381,8 +1406,41 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                     .name,
             )?
         } else {
-            self.sync_incremental_or_fallback(source, target, matching_snapshot_and_later)?
+            self.sync_incremental_or_fallback(source, target, &matching_snapshot_and_later)?
         };
+
+        if self.args.use_hold != "false"
+            && !self.args.use_hold.is_empty()
+            && let (snap_or_bookmark, other_snaps) = &matching_snapshot_and_later
+            && !other_snaps.is_empty()
+        {
+            // other_snaps is guaranteed to be non-empty here as of writing, but
+            // keeping the check in case that doesn't hold true later
+            let hold_prefix = match self.args.use_hold.as_str() {
+                "syncoid" => "syncoid",
+                _ => "chithi",
+            };
+            let hostname = hostname()?;
+            let hold_name = format!(
+                "{hold_prefix}_{}{hostname}",
+                self.args.identifier.as_deref().unwrap_or_default()
+            );
+            let latest = other_snaps.last().expect("non empty").name.as_str();
+            // Set new hold on source
+            self.zfs_hold("hold", &hold_name, source, latest)?;
+            // Release hold if matching snapshot
+            if let IntermediateSource::Snapshot(Snapshot { name, .. }) = snap_or_bookmark {
+                self.zfs_hold("release", &hold_name, source, name)?;
+            }
+            // Set new hold on target
+            self.zfs_hold("hold", &hold_name, target, latest)?;
+            let target_snapshot = match snap_or_bookmark {
+                IntermediateSource::Snapshot(Snapshot { name, .. }) => name,
+                IntermediateSource::Bookmark(_, name) => name,
+            };
+            // Release hold on target
+            self.zfs_hold("release", &hold_name, target, target_snapshot)?;
+        }
 
         if !self.args.keep_sync_snap
             && let Some(new_sync_snap) = created_new_sync_snap
@@ -1413,13 +1471,6 @@ fn main() -> io::Result<()> {
         .format_timestamp(None)
         .format_target(false)
         .init();
-
-    if let Some(max_delay) = args.max_delay_seconds {
-        let max_delay = max_delay.get();
-        let delay_seconds = rand::random_range(0..max_delay);
-        info!("Delaying transfer for {delay_seconds} seconds");
-        sleep(Duration::from_secs(delay_seconds as u64));
-    }
 
     // Build fs
     let source = Fs::new(args.source_host.as_deref(), &args.source, Role::Source);

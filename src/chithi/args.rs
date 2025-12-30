@@ -19,7 +19,7 @@ use crate::chithi::send_recv_opts::{OptionsLine, Opts};
 use bw::Bytes;
 use clap::Parser;
 use regex_lite::Regex;
-use std::{collections::HashSet, num::NonZero};
+use std::collections::HashSet;
 
 mod bw;
 
@@ -83,6 +83,14 @@ pub struct Args {
         value_name = "SNAPFORMAT"
     )]
     pub prune_formats: Vec<String>,
+
+    /// Adds a hold to the newest snapshot on the source and target after
+    /// replication and removes the hold after the next successful replication.
+    /// The hold name includes the identifier if set. This allows for separate
+    /// holds in case of multiple targets. Can be optionally passed the value
+    /// "syncoid" to make syncoid compatible holds.
+    #[arg(long, default_value = "false", default_missing_value = "true", value_parser = ["true", "false", "syncoid"], num_args = 0..=1)]
+    pub use_hold: String,
 
     /// Does not rollback snapshots on target (it probably requires a readonly target)
     #[arg(long)]
@@ -185,10 +193,6 @@ pub struct Args {
     /// Prevents the recursive recv check at the start of the sync
     #[arg(long, requires = "recursive")]
     pub no_recv_check_start: bool,
-
-    /// Adds a randomized delay before starting. Max 65535 seconds, just over 18 hours.
-    #[arg(long, value_name = "SECONDS")]
-    pub max_delay_seconds: Option<NonZero<u16>>,
 
     pub source: String,
 

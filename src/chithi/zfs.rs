@@ -95,20 +95,20 @@ impl<'a, 'b> From<&'a Snapshot<&'b str>> for Snapshot<String> {
 
 pub enum IntermediateSource<'a> {
     Snapshot(Snapshot<&'a str>),
-    Bookmark(Snapshot<&'a str>),
+    Bookmark(Snapshot<&'a str>, &'a str),
 }
 
 impl<'a> IntermediateSource<'a> {
     pub fn source(&self) -> String {
         match self {
             IntermediateSource::Snapshot(snapshot) => format!("@{}", snapshot.name),
-            IntermediateSource::Bookmark(snapshot) => format!("#{}", snapshot.name),
+            IntermediateSource::Bookmark(snapshot, _target) => format!("#{}", snapshot.name),
         }
     }
     pub fn kind(&self) -> &'static str {
         match self {
             IntermediateSource::Snapshot(_) => "snapshot",
-            IntermediateSource::Bookmark(_) => "bookmark",
+            IntermediateSource::Bookmark(_, _) => "bookmark",
         }
     }
 }
