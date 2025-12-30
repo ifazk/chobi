@@ -19,15 +19,17 @@ use chobi::chithi::sync_pipelines::OptionalCommands;
 use chobi::chithi::sys::{get_syncoid_date, hostname};
 use chobi::chithi::util::ReadableBytes;
 use chobi::chithi::zfs::{Creation, IntermediateSource, Snapshot, SnapshotInfo};
-use chobi::chithi::{Args, Cmd, CmdTarget, Fs, Role, Sequence, get_is_roots};
+use chobi::chithi::{Args, Cli, Cmd, CmdTarget, Commands, Fs, Role, Sequence, get_is_roots};
 use clap::Parser;
 use log::{debug, error, info, trace, warn};
 use regex_lite::Regex;
 use std::{
     cell::LazyCell,
     collections::{HashMap, HashSet},
+    ffi::OsString,
     io::{self, BufRead, BufReader},
-    process::Stdio,
+    os::unix::process::CommandExt,
+    process::{Command, Stdio},
 };
 
 const DOES_NOT_EXIST: &str = "dataset does not exist";
@@ -1454,9 +1456,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
     }
 }
 
-fn main() -> io::Result<()> {
-    let args = Args::parse();
-
+fn sync(args: Args) -> io::Result<()> {
     // TODO: validate send and recv options and conflicts
 
     let default_log = if args.quiet {
@@ -1582,4 +1582,18 @@ fn main() -> io::Result<()> {
     CmdConfig::destroy_ssh_masters(&mut source_cmd_target, &mut target_cmd_target)?;
 
     Ok(())
+}
+
+fn main() -> io::Result<()> {
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Sync(args) => sync(args),
+        Commands::External(args) => {
+            let mut program = OsString::from("chithi-");
+            program.push(&args[0]);
+            let mut command = Command::new(program);
+            command.args(&args[1..]);
+            Err(command.exec())
+        }
+    }
 }

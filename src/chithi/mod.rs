@@ -27,7 +27,7 @@ pub mod sys;
 pub mod util;
 pub mod zfs;
 
-pub use args::Args;
+pub use args::{Args, Cli, Commands};
 pub use cmd::Cmd;
 pub use cmd::CmdTarget;
 pub use cmd::CmdVec;

@@ -17,15 +17,32 @@
 use crate::chithi::compress::Compress;
 use crate::chithi::send_recv_opts::{OptionsLine, Opts};
 use bw::Bytes;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use regex_lite::Regex;
 use std::collections::HashSet;
+use std::ffi::OsString;
 
 mod bw;
 
-/// ZFS snapshot replication tool
+#[derive(Debug, Parser)]
+#[command(name = "chithi")]
+#[command(version, about = "ZFS snapshot replication tool", long_about = None)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Subcommand)]
+pub enum Commands {
+    /// Replicates a dataset to another pool
+    Sync(Args),
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
+}
+
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(about, long_about = None)]
 pub struct Args {
     /// Compresses data during transfer. Currently accepted options are gzip,
     /// pigz-fast, pigz-slow, zstd-fast, zstdmt-fast, zstd-slow, zstdmt-slow,
