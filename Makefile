@@ -1,14 +1,21 @@
-.PHONY: check build test test_help
+.PHONY: check build build_linux build_freebsd test test_help
 
 check:
 	cargo fmt --check
 	cargo check
 	cargo clippy
 
-build: check
-	cargo build --release
-	# statically compiling for x86_64 is our differentiator from syncoid
+build: build_linux build_freebsd
+
+build_linux: check
+	cargo build --release --target x86_64-unknown-linux-musl
+	file target/x86_64-unknown-linux-musl/release/chithi
 	ls -lah target/x86_64-unknown-linux-musl/release/chithi
+
+build_freebsd: check
+	cargo build --release --target x86_64-unknown-freebsd
+	file target/x86_64-unknown-freebsd/release/chithi
+	ls -lah target/x86_64-unknown-freebsd/release/chithi
 
 TEST_ARGS=
 
