@@ -59,7 +59,7 @@ impl<T> Snapshot<T> {
 impl Snapshot<String> {
     pub fn fake_newest(name: String) -> Self {
         const FAKE_NEW_SYNC_GUID: &str = "9999999999999999999";
-        const FAKE_NEW_SYNC_CREATION: u64 = 9999999999;
+        const FAKE_NEW_SYNC_CREATION: u64 = u64::MAX;
         Self {
             name,
             guid: FAKE_NEW_SYNC_GUID.to_string(),
@@ -109,6 +109,12 @@ impl<'a> IntermediateSource<'a> {
         match self {
             IntermediateSource::Snapshot(_) => "snapshot",
             IntermediateSource::Bookmark(_, _) => "bookmark",
+        }
+    }
+    pub fn creation(&self) -> u64 {
+        match self {
+            IntermediateSource::Snapshot(snapshot) => snapshot.creation.creation,
+            IntermediateSource::Bookmark(snapshot, _) => snapshot.creation.creation,
         }
     }
 }

@@ -39,6 +39,15 @@ some more escaping might be needed.
    to prune both formats. Defaults to "--prune-format chithi" if not set.
 5. Cli `--dry-run`.
 6. Plugins.
+7. Cli `--use-bookmarks`. This option will agressively fetch both snapshots and
+   bookmarks for computing incremental sends. Useful for infrequent replication
+   with aggressive snapshot pruning at source.
+8. For `--create-bookmark`, by default we name them with
+   `chithi_{identifier}{hostname}`. This can be changed to the syncoid 2.3 style
+   with `--syncoid-bookmarks`.
+9. We have `--max-bookmarks` to cleanup bookmarks after creating new bookmarks.
+   This is off by default. There's very little reason to delete bookmarks since
+   they are extermely cheap, but sometimes it is nice to tidy things up.
 
 # Why Rust? Why Not Go?
 There are no technical or social reasons why I'm choosing Rust. Go would have
@@ -67,7 +76,6 @@ release the binary for chithi if I finish the following features.
    + Use 'chithi:sync' but allow fallback to check for 'syncoid:sync'
    + Allow format flags for pruning both syncoid and chithi sync snaps
 - Cleanup
-  + Manage bookmarks
   + Manage target snapshots
   + Cleanup for --no-stream
 

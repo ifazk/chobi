@@ -19,7 +19,7 @@ use std::{
     borrow::Cow,
     fmt::Display,
     io,
-    process::{Command, Output, Stdio},
+    process::{Command, ExitStatus, Output, Stdio},
 };
 
 use crate::chithi::sys;
@@ -378,6 +378,17 @@ impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Cmd<'args, T> {
         cmd
     }
 
+    pub fn status(&self, debug: bool) -> io::Result<ExitStatus> {
+        let mut cmd = self.to_cmd();
+        cmd.stdin(Stdio::null()).stdout(Stdio::null());
+        if debug {
+            cmd.stderr(Stdio::inherit());
+        } else {
+            cmd.stderr(Stdio::null());
+        };
+        cmd.status()
+    }
+
     pub fn to_mut(&self) -> Cmd<'args, Vec<&'cmd str>> {
         self.into()
     }
@@ -649,6 +660,17 @@ impl<'args, T> Sequence<'args, T> {
 impl<'args, 'cmd, T: AsRef<[&'cmd str]>> Sequence<'args, T> {
     pub fn to_cmd(&self) -> Command {
         self.0.to_cmd_with_sep(";")
+    }
+
+    pub fn status(&self, debug: bool) -> io::Result<ExitStatus> {
+        let mut cmd = self.to_cmd();
+        cmd.stdin(Stdio::null()).stdout(Stdio::null());
+        if debug {
+            cmd.stderr(Stdio::inherit());
+        } else {
+            cmd.stderr(Stdio::null());
+        };
+        cmd.status()
     }
 }
 

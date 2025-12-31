@@ -23,6 +23,7 @@ use chobi::chithi::{Args, Cli, Cmd, CmdTarget, Commands, Fs, Role, Sequence, get
 use clap::Parser;
 use log::{debug, error, info, trace, warn};
 use regex_lite::Regex;
+use std::process::ExitStatus;
 use std::{
     cell::LazyCell,
     collections::{HashMap, HashSet},
@@ -1046,20 +1047,35 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         } else {
             debug!("Releasing hold hold on {fs} with {zfs}...")
         }
-        let mut zfs_cmd = zfs.to_cmd();
-        zfs_cmd.stdin(Stdio::null()).stdout(Stdio::null());
-        if self.args.debug {
-            zfs_cmd.stderr(Stdio::inherit());
-        } else {
-            zfs_cmd.stderr(Stdio::null());
-        };
-        let status = zfs_cmd.status()?;
+        if self.args.dry_run {
+            debug!("dry-run not running {zfs}...");
+            return Ok(());
+        }
+        let status = zfs.status(self.args.debug)?;
         if status.success() {
             Ok(())
         } else {
             warn!("{zfs} failed with {status}");
             Ok(())
         }
+    }
+
+    fn create_bookmark(
+        &self,
+        fs: &Fs,
+        snapshot: Snapshot<&str>,
+        bookmark_name: &str,
+    ) -> io::Result<ExitStatus> {
+        let mut zfs = self.source_zfs.to_mut();
+        let fs_snapshot = format!("{}@{}", fs.fs, snapshot.name);
+        let fs_bookmark = format!("{}#{}", fs.fs, bookmark_name);
+        zfs.args(["bookmark", &fs_snapshot, &fs_bookmark]);
+        debug!("Creat new bookmark on {fs} with {zfs}...");
+        if self.args.dry_run {
+            debug!("dry-run not running {zfs}...");
+            return Ok(ExitStatus::default());
+        };
+        zfs.status(self.args.debug)
     }
 
     fn prune_old_sync_snaps(
@@ -1124,12 +1140,65 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
                         target.pretty_str()
                     );
                 }
+                if self.args.dry_run {
+                    debug!("dry-run not running {sequence}");
+                    continue;
+                }
                 let mut seq = sequence.to_cmd();
                 let status = seq
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status()?;
+                // Sequences will silently ignore failures in the middle
+                if !status.success() {
+                    warn!("'{}' failed with: {status}", sequence);
+                }
+            };
+        }
+        Ok(())
+    }
+
+    fn prune_bookmarks(&self, source: &Fs, bookmarks: &[&Snapshot<String>]) -> io::Result<()> {
+        let zfs = self.pick_zfs(source.role);
+        let target = zfs.target();
+        let zfs = zfs.to_mut().to_local();
+        const MAX_PRUNE: usize = 10usize;
+        for chunk in bookmarks.chunks(MAX_PRUNE) {
+            let bookmarks = chunk
+                .iter()
+                .map(|bookmark| format!("{}#{}", source.fs, bookmark.name))
+                .collect::<Vec<_>>();
+            let cmds = bookmarks
+                .iter()
+                .map(|bookmark| {
+                    let mut zfs = zfs.to_mut();
+                    zfs.args(["destroy", bookmark]);
+                    zfs
+                })
+                .collect::<Vec<_>>();
+            if let Some(sequence) = Sequence::from(target, cmds) {
+                if chunk.len() == 1 {
+                    // nicer debug message in the usual case
+                    debug!(
+                        "pruning 1 bookmark from {}: {}",
+                        target.pretty_str(),
+                        bookmarks[0]
+                    );
+                } else {
+                    debug!(
+                        "pruning {} bookmarks from {}",
+                        chunk.len(),
+                        target.pretty_str()
+                    );
+                }
+                if self.args.dry_run {
+                    debug!("dry-run not running {sequence}");
+                    continue;
+                }
+                //let mut seq = sequence.to_cmd();
+                let status = sequence.status(self.args.debug)?;
+                // Sequences will silently ignore failures in the middle
                 if !status.success() {
                     warn!("'{}' failed with: {status}", sequence);
                 }
@@ -1285,24 +1354,56 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             self.get_snaps(target)?
         };
         let mut target_snaps_map = Snapshot::list_to_map(&target_snaps_list);
-        let source_bookmarks_maybe;
+        let mut source_bookmarks_maybe = if self.args.use_bookmarks == "always" {
+            let source_bookmarks = self.get_bookmarks(source)?;
+            self.dump_snaps_maybe(source, &source_bookmarks);
+            Some(source_bookmarks)
+        } else {
+            None
+        };
 
-        let matching_snapshot_and_later = {
+        let matching_and_later = {
             self.dump_snaps_maybe(target, &target_snaps_list);
             let matching_snap = self.get_matching_snapshot(&source_snaps, &target_snaps_map);
-            let bookmark = if matching_snap.is_none() {
-                let source_bookmarks = self.get_bookmarks(source)?;
-                self.dump_snaps_maybe(source, &source_bookmarks);
-                source_bookmarks_maybe = Some(source_bookmarks);
-                self.get_matching_bookmark(
-                    &target_snaps_list,
-                    source_bookmarks_maybe.as_ref().expect("set to some above"),
-                    &source_snaps,
-                )
-            } else {
-                None
-            };
-            if let Some(matching_snap) = matching_snap.or(bookmark) {
+            let matching_snap_or_bookmark =
+                if matching_snap.is_none() && source_bookmarks_maybe.is_none() {
+                    // --use-bookmarks="fallback"
+                    let source_bookmarks = self.get_bookmarks(source)?;
+                    self.dump_snaps_maybe(source, &source_bookmarks);
+                    source_bookmarks_maybe = Some(source_bookmarks);
+                    self.get_matching_bookmark(
+                        &target_snaps_list,
+                        source_bookmarks_maybe.as_ref().expect("set to some above"),
+                        &source_snaps,
+                    )
+                } else if matching_snap.is_none() {
+                    // --use-bookmarks="always"
+                    self.get_matching_bookmark(
+                        &target_snaps_list,
+                        source_bookmarks_maybe
+                            .as_ref()
+                            .expect("is_none check failed above"),
+                        &source_snaps,
+                    )
+                } else if let Some(snap) = &matching_snap
+                    && let Some(bookmarks) = source_bookmarks_maybe.as_ref()
+                {
+                    // --use-bookmarks="always"
+                    if let Some(matching_bookmark) =
+                        self.get_matching_bookmark(&target_snaps_list, bookmarks, &source_snaps)
+                        && matching_bookmark.0.creation() > snap.0.creation()
+                    {
+                        Some(matching_bookmark)
+                    } else {
+                        matching_snap
+                    }
+                } else {
+                    // --use-bookmarks="fallback"
+                    // matching snap is some, but we didn't fetch bookmarks
+                    // since we already have matching snaps, we don't need to fallback to bookmarks
+                    matching_snap
+                };
+            if let Some(matching_snap) = matching_snap_or_bookmark {
                 matching_snap
             } else {
                 // Size check target fs to see if it was accidentally created before sync
@@ -1382,15 +1483,15 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             }
         };
 
-        if matching_snapshot_and_later.1.is_empty() {
+        if matching_and_later.1.is_empty() {
             // message is not that meaningful if target was just created with the latest snapshot or we resumed to the latest stapshot
             if !target_created && !resumed {
                 info!(
                     "no snapshots newer than {} in {source}. Target {target} up to date, nothing to do, not syncing.",
-                    matching_snapshot_and_later.0.source()
+                    matching_and_later.0.source()
                 );
             }
-            // TODO decide is hold management, sync-snap-pruning is needed for target_created || resumed
+            // TODO decide if hold management, sync-snap-pruning is needed for target_created || resumed
             return Ok(());
         }
 
@@ -1400,20 +1501,16 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             self.sync_intermidiate(
                 source,
                 target,
-                &matching_snapshot_and_later.0,
-                &matching_snapshot_and_later
-                    .1
-                    .last()
-                    .expect("non-empty checked")
-                    .name,
+                &matching_and_later.0,
+                &matching_and_later.1.last().expect("non-empty checked").name,
             )?
         } else {
-            self.sync_incremental_or_fallback(source, target, &matching_snapshot_and_later)?
+            self.sync_incremental_or_fallback(source, target, &matching_and_later)?
         };
 
         if self.args.use_hold != "false"
             && !self.args.use_hold.is_empty()
-            && let (snap_or_bookmark, other_snaps) = &matching_snapshot_and_later
+            && let (snap_or_bookmark, other_snaps) = &matching_and_later
             && !other_snaps.is_empty()
         {
             // other_snaps is guaranteed to be non-empty here as of writing, but
@@ -1444,6 +1541,64 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             self.zfs_hold("release", &hold_name, target, target_snapshot)?;
         }
 
+        if self.args.create_bookmark
+            && let Some(latest) = matching_and_later.1.last()
+        {
+            if self.args.syncoid_bookmarks {
+                // This is the only place where we need to use real guids. In
+                // syncoid, they do a check no-sync-snap to ensure that they
+                // have the guid in the snapshop map. We have syncoid_bookmarks
+                // require no-sync-snap in cli parsing, so the guid is real.
+                let res = self.create_bookmark(source, latest.into(), &latest.name)?;
+                if !res.success() {
+                    // Assume name conflict try guid fallback
+                    let guid_prefix = String::from_utf8_lossy(&latest.guid.as_bytes()[0..6]);
+                    info!(
+                        "bookmark creation failed, retrying with guid based suffix ({guid_prefix})"
+                    );
+                    let bookmark_name = format!("{}{}", latest.name, guid_prefix);
+                    let res = self.create_bookmark(source, latest.into(), &bookmark_name)?;
+                    if !res.success() {
+                        return Err(io::Error::other("syncoid style bookmark creation failed"));
+                    }
+                }
+            } else {
+                let hostname = hostname()?;
+                let bookmark_prefix = format!(
+                    "chithi_{}{hostname}",
+                    self.args.identifier.as_deref().unwrap_or_default()
+                );
+                let bookmark_name = format!("{bookmark_prefix}_{}", latest.name);
+                let res = self.create_bookmark(source, latest.into(), &bookmark_name)?;
+                if !res.success() {
+                    return Err(io::Error::other("bookmark creation failed"));
+                }
+                // Creating succeeded, so now prune
+                if let Some(n) = self.args.max_bookmarks {
+                    let to_keep = n.get() - 1; // - 1 for the newly created
+                    if source_bookmarks_maybe.is_none() {
+                        source_bookmarks_maybe = Some(self.get_bookmarks(source)?);
+                    };
+                    let source_bookmarks =
+                        source_bookmarks_maybe.as_ref().expect("set to some above");
+                    let source_bookmarks = source_bookmarks
+                        .iter()
+                        .filter(|b| {
+                            b.name
+                                .strip_prefix(&bookmark_prefix)
+                                .is_some_and(|s| s.starts_with('_'))
+                        })
+                        .collect::<Vec<_>>();
+                    let bookmarks_to_delete = if source_bookmarks.len() < to_keep {
+                        &source_bookmarks[..0]
+                    } else {
+                        &source_bookmarks[..(source_bookmarks.len() - to_keep)]
+                    };
+                    self.prune_bookmarks(source, bookmarks_to_delete)?
+                }
+            }
+        }
+
         if !self.args.keep_sync_snap
             && let Some(new_sync_snap) = created_new_sync_snap
         {
@@ -1457,7 +1612,19 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
 }
 
 fn sync(args: Args) -> io::Result<()> {
-    // TODO: validate send and recv options and conflicts
+    if args.recursive
+        && args
+            .send_options
+            .options
+            .iter()
+            .any(|opt| opt.option == 'R')
+    {
+        warn!("invalid argument combination, zfs send -R and --recursive are not compatible");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "zfs send -R and chithi --recursive are not compatible",
+        ));
+    }
 
     let default_log = if args.quiet {
         "error"

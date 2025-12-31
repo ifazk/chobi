@@ -91,9 +91,21 @@ pub struct Args {
     #[arg(long)]
     pub keep_sync_snap: bool,
 
+    /// Creates a zfs bookmark for the newest snapshot on source after replication succeeds.
+    /// Unless --syncoid-bookmarks is set, the bookmark name includes the
+    /// identifier if set.
+    #[arg(long)]
+    pub create_bookmark: bool,
+
+    /// Use the sanoid/syncoid 2.3 bookmark behaviour. This should be treated as
+    /// an experinmental feature, and may not be kept in future minor revisions.
+    #[arg(long, requires = "no_sync_snap", requires = "create_bookmark")]
+    pub syncoid_bookmarks: bool,
+
     /// If transfer creates new sync snaps, this option chooses what kind of
     /// snapshot formats to prune at the end of transfers. Current options are
-    /// syncoid and chithi.
+    /// syncoid and chithi. Needs to be passed multiple times for multiple
+    /// formats.
     #[arg(
         long = "prune-format",
         default_value = "chithi",
@@ -124,6 +136,16 @@ pub struct Args {
     /// Only include snapshots that match the given regular expression. Can be specified multiple times. If a snapshot matches both exclude-snaps and include-snaps patterns, then it will be excluded.
     #[arg(long, value_name = "REGEX")]
     pub include_snaps: Vec<Regex>,
+
+    /// Use bookmarks for incremental syncing. When set to "always" (assumed if
+    /// no value is passed), we fetch bookmarks as well as snapshots when
+    /// computing incremental sends.
+    #[arg(long, default_value = "fallback", default_missing_value = "always", value_parser = ["always", "fallback"], num_args = 0..=1)]
+    pub use_bookmarks: String,
+
+    /// Prune bookmarks. Bookmarks are not
+    #[arg(long, conflicts_with = "syncoid_bookmarks")]
+    pub max_bookmarks: Option<std::num::NonZero<usize>>,
 
     /// Use advanced options for zfs send (the arguments are filtered as needed), e.g. chithi --send-options="Lc e" sets zfs send -L -c -e ...
     #[arg(long, value_name = "OPTIONS", value_parser = Opts::try_from_str, default_value_t)]
