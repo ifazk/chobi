@@ -49,7 +49,7 @@ struct CmdConfig<'args, 'target> {
     target_ps: Cmd<'args, &'target [&'args str]>,
     target_zfs: Cmd<'args, &'target [&'args str]>,
     optional_cmds: OptionalCommands<'args>,
-    _optional_features: HashSet<&'static str>,
+    optional_features: HashSet<&'static str>,
     args: &'args Args,
     zfs_recv: Regex,
 }
@@ -74,8 +74,6 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         }
         let optional_cmds =
             OptionalCommands::new(source_cmd_target, target_cmd_target, local_cmd_target, args)?;
-        // TODO
-        let optional_features = HashSet::new();
         // precompile zfs_recv regex
         let zfs_recv = {
             // In syncoid they use this regex:
@@ -93,7 +91,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             source_zfs,
             target_ps,
             target_zfs,
-            _optional_features: optional_features,
+            optional_features: HashSet::new(),
             optional_cmds,
             args,
             zfs_recv,
@@ -346,6 +344,19 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
             ))
         })?;
         Ok(value.to_string())
+    }
+
+    fn check_resume(cmd_target: &CmdTarget, is_root: bool) -> io::Result<bool> {
+        let zpool_args = ["get", "-o", "value", "-H", "feature@extensible_dataset"];
+        let zpool = Cmd::new(cmd_target, !is_root, "zpool", zpool_args);
+        debug!(
+            "checking if zfs resume feature is available on source {} with {zpool}...",
+            cmd_target.pretty_str()
+        );
+
+        let output = zpool.capture_stdout()?.stdout;
+        let output = String::from_utf8_lossy(&output);
+        Ok(output.contains("active") || output.contains("enabled"))
     }
 
     /// Will fail for dry-run sync-snaps, so special case that instead of using this
@@ -1214,7 +1225,12 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
     /// Syncs a single dataset
     fn sync_dataset(&self, source: &Fs, target: &Fs, skip_sync_snapshot: bool) -> io::Result<()> {
         debug!("syncing source {} to target {}", source, target);
-        let sync = self.get_zfs_value(source, &["syncoid:sync"]);
+        let sync_check_property = if self.args.syncoid_sync_check {
+            "syncoid:sync"
+        } else {
+            "chithi:sync"
+        };
+        let sync = self.get_zfs_value(source, &[sync_check_property]);
         let sync = match sync {
             Ok(sync) => sync,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -1230,14 +1246,16 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         };
 
         if sync == "false" {
-            info!("Skipping dataset (syncoid:sync=false): {source}...");
+            info!("Skipping dataset ({sync_check_property}=false): {source}...");
             return Ok(());
         } else if !["true", "-", ""].contains(&sync.as_str()) {
             // empty is handled the same as "-", hostnames "true" and "false" are
             // unsupported, and hostnames cannot start with "-" anyway (citation needed)
             let host_id = hostname()?;
             if !sync.split(',').any(|x| x == host_id) {
-                info!("Skipping dataset (syncoid:sync does not contain {host_id}): {source}...");
+                info!(
+                    "Skipping dataset ({sync_check_property} does not contain {host_id}): {source}..."
+                );
                 return Ok(());
             }
         }
@@ -1254,8 +1272,7 @@ impl<'args, 'target> CmdConfig<'args, 'target> {
         // Check if target exists
         let target_exists = self.target_exists(target)?;
 
-        #[allow(unused_variables)]
-        let recv_token = if target_exists && !self.args.no_resume {
+        let recv_token = if target_exists && self.optional_features.contains("resume") {
             let recv_token = self.get_resume_token(target)?;
             if let Some(recv_token) = recv_token.as_ref() {
                 debug!("got recv resume token: {recv_token}")
@@ -1677,7 +1694,7 @@ fn sync(args: Args) -> io::Result<()> {
         &local_cmd_target,
         args.no_command_checks,
     )?;
-    let cmds = CmdConfig::new(
+    let mut cmds = CmdConfig::new(
         &source_cmd_target,
         source_is_root,
         &target_cmd_target,
@@ -1687,6 +1704,20 @@ fn sync(args: Args) -> io::Result<()> {
     )?;
 
     trace!("built cmd configs");
+
+    // Check and enable optional features
+    if !args.no_resume {
+        // only place for zpool
+        if CmdConfig::check_resume(&source_cmd_target, source_is_root)?
+            && (target_cmd_target == source_cmd_target
+                || CmdConfig::check_resume(&target_cmd_target, target_is_root)?)
+        {
+            debug!("resume feature enabled");
+            cmds.optional_features.insert("resume");
+        } else {
+            debug!("resume feature disabled");
+        };
+    }
 
     // Check if recursive
     if !args.recursive {

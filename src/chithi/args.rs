@@ -102,6 +102,12 @@ pub struct Args {
     #[arg(long, requires = "no_sync_snap", requires = "create_bookmark")]
     pub syncoid_bookmarks: bool,
 
+    /// Use "syncoid:sync" property to check if we should sync sync. This should
+    /// be treated as an experinmental feature, and may not be kept in future
+    /// minor revisions.
+    #[arg(long)]
+    pub syncoid_sync_check: bool,
+
     /// If transfer creates new sync snaps, this option chooses what kind of
     /// snapshot formats to prune at the end of transfers. Current options are
     /// syncoid and chithi. Needs to be passed multiple times for multiple

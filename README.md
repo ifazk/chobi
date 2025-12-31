@@ -70,11 +70,6 @@ release the binary for chithi if I finish the following features.
 ## Current TODOs for Chithi
 
 - Preserve properties
-- Check for ZFS resume feature before using it
-- Check for keystatus and encryption for non-raw sends
-- Compatibility flags
-   + Use 'chithi:sync' but allow fallback to check for 'syncoid:sync'
-   + Allow format flags for pruning both syncoid and chithi sync snaps
 - Cleanup
   + Manage target snapshots
   + Cleanup for --no-stream
