@@ -1,5 +1,5 @@
-//  Chobi and Chithi: Managment tools for ZFS snapshot, send, and recv
-//  Copyright (C) 2025  Ifaz Kabir
+//  Chobi: OpenZFS snapshot tool
+//  Copyright (C) 2025-2026  Ifaz Kabir
 
 //  This program is free software: you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by

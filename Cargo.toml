@@ -2,6 +2,11 @@
 name = "chobi"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
+description = "OpenZFS snapshot tool"
+repository = "https://github.com/ifazk/chobi"
+keywords = ["zfs", "snapshot"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 chrono = { version = "0.4.42", features = ["now"] }
